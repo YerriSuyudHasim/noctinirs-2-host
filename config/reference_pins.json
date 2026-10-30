@@ -1,0 +1,29 @@
+{
+  "schema": "noctinirs_host.reference_pins/1",
+  "firmware_repo": "YerriSuyudHasim/noctinirs-2",
+  "firmware_commit": "2ccbbffb00ea735a1cd652d271e3a1bed463a25d",
+  "firmware_branch": "cursor/n3-single-clock-72a4",
+  "pinned_files": {
+    "docs/drafts/OPTICAL_DATA_CONTRACT_DRAFT.md": {
+      "version": "v0.3 DRAFT",
+      "sha256": "b2bc59aaf8ffd852fba55bf8bbc3618aab4e08fe1430ab35cba10f5985c9df9e"
+    },
+    "docs/drafts/optical_geometry_v1.draft.json": {
+      "sha256": "ddc2a094273e447128d0d99ffacb3c2b48b62a89452956b257d592adb42a3c23",
+      "host_copy": "config/optical_geometry_v1.draft.json"
+    },
+    "docs/adr/0004-host-protocol.md": {
+      "status": "Proposed",
+      "sha256": "f3db72a455df3cf0552f2401116a9f8dcf99cc7430a8539a86fee4d9513358e3"
+    }
+  },
+  "pending_uncommitted": {
+    "docs/drafts/OPTICAL_DATA_CONTRACT_DRAFT_v0.4_PENDING.md": {
+      "version": "v0.4.1",
+      "sha256": "f38755c474b664ab77d28cedb977634c1eeed5f6c16ccd8c3e66fb4284b97ad7",
+      "note": "Not in the firmware repository yet. The hash is the reference until it is committed (after Batch 2). The host code follows this file where it differs from v0.3."
+    }
+  },
+  "golden_vectors": null,
+  "verified_against_c_implementation": false
+}
