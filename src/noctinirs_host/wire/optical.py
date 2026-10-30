@@ -224,7 +224,7 @@ def _int24(b0: int, b1: int, b2: int) -> int:
 
 
 def _slot_problem(f_flags_ok: bool, quality: int, reason: int, mask: int, witness: int,
-                  n_on: int, n_off: int,
+                  n_on: int, n_off: int, avail_on: int, avail_off: int,
                   dets: list[DetectorRecord]) -> tuple[str, bool] | None:
     """First problem of a gated slot as (detail, fatal), else None.
 
@@ -245,6 +245,8 @@ def _slot_problem(f_flags_ok: bool, quality: int, reason: int, mask: int, witnes
         return "bad_witness", True
     if mask & 0xF0:
         return "bad_verified_mask", True
+    if n_on > avail_on or n_off > avail_off:
+        return "used_gt_available", True
     if reason:
         if reason & REASON_STOP_ABORT and reason & REASON_STARTUP_WARMUP:
             return "reason_quality", True
@@ -353,17 +355,22 @@ def parse_opt2(payload: bytes) -> Opt2Frame:
                                        payload[stab_off + i * DET_COUNT + d]))
         invalid = None
         if engineering:
+            if n_on > a_on or n_off > a_off:
+                raise WireError("used_gt_available",
+                                f"slot {i}: used counts exceed available counts")
             bad = _engineering_check(i, mask, witness, reason, dets)
             if bad:
                 raise WireError("engineering_rule", bad)
             warnings.extend(_engineering_warnings(i, quality, reason, dets))
         else:
-            problem = _slot_problem(flags_ok, quality, reason, mask, witness, n_on, n_off, dets)
+            problem = _slot_problem(flags_ok, quality, reason, mask, witness, n_on, n_off,
+                                   a_on, a_off, dets)
             if problem:
                 detail, fatal = problem
                 if fatal:
                     # codes with their own counter keep their name; others are grouped
-                    code = detail if detail in ("reason_quality", "verified_n_lt_2") \
+                    code = detail if detail in ("reason_quality", "verified_n_lt_2",
+                                                "used_gt_available") \
                         else "slot_inconsistent"
                     raise WireError(code, f"slot {i}: {detail}")
                 invalid = detail

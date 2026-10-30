@@ -20,6 +20,7 @@ REJECT_REASONS = (
     "engineering_mismatch",
     "verified_n_lt_2",
     "reason_quality",
+    "used_gt_available",
 )
 
 
@@ -52,5 +53,5 @@ class RejectCounters:
         return frame
 
     def named(self) -> dict[str, int]:
-        """The six reviewer-requested counters (zero when never seen)."""
+        """The reviewer-requested counters (zero when never seen)."""
         return {r: self.rejected.get(r, 0) for r in REJECT_REASONS}

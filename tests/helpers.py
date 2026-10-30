@@ -28,11 +28,15 @@ def blank_det(flags=0):
                 flags=flags, stab=0xFF)
 
 
-def slot(i, quality=2, reason=0, n_on=10, n_off=10, mask=0x0F, witness=0, dets=None):
+def slot(i, quality=2, reason=0, n_on=10, n_off=10, mask=0x0F, witness=0, dets=None,
+         avail_on=None, avail_off=None):
+    """avail_* default to the used counts (available == used)."""
     if dets is None:
         dets = [det() if (mask >> d) & 1 else blank_det() for d in range(4)]
     return dict(i=i, quality=quality, reason=reason, n_on=n_on, n_off=n_off, mask=mask,
-                witness=witness, dets=dets)
+                witness=witness, dets=dets,
+                avail_on=n_on if avail_on is None else avail_on,
+                avail_off=n_off if avail_off is None else avail_off)
 
 
 def blank_slot(i, reason=1 << 10):
@@ -56,7 +60,7 @@ def build_opt2(slots=None, frame_flags=0, gate_config_id=1, adc_source=1, layout
     stab = bytearray()
     for s in slots:
         out += struct.pack("<BBHBBBBBBBB", s["i"], s["quality"], s["reason"], s["n_on"],
-                           s["n_off"], s["n_on"], s["n_off"], 0, 0, s["witness"], s["mask"])
+                           s["n_off"], s["avail_on"], s["avail_off"], 0, 0, s["witness"], s["mask"])
         for d in s["dets"]:
             out += struct.pack("<iiHHB", d["sum_on"], d["sum_off"], d["sd_on"], d["sd_off"],
                                d["flags"])

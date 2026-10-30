@@ -10,6 +10,7 @@ def test_each_named_counter_counts_its_own_rejection():
         "engineering_mismatch": build_opt2(frame_flags=o.FF_ENGINEERING_UNGATED, gate_config_id=1),
         "verified_n_lt_2": build_opt2(slot_overrides={0: slot(0, n_on=1)}),
         "reason_quality": build_opt2(slot_overrides={0: slot(0, quality=2, reason=1)}),
+        "used_gt_available": build_opt2(slot_overrides={0: slot(0, n_on=10, avail_on=9)}),
         "raw_flags": build_raw(raw_flags=0),
         "sample_count": build_raw(samples=[raw_sample()] * 101),
     }
