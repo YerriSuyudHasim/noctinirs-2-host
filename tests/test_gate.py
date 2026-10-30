@@ -55,21 +55,33 @@ def test_false_pass_is_caught():
     assert {"false_pass", "step_z_flag_differs", "floor_flag_differs"} <= codes
 
 
-def test_flag_lies_in_other_direction_is_flagged():
-    d = det(flags=0x04 | 0x10)  # claims STEP_Z and FLOOR, not STABLE; host says STABLE passes
+def test_missing_pass_flag_on_verified_slot_closes_science():
+    d = det(flags=0x04 | 0x10)  # no STABLE flag, but slot claims verified
     f = o.parse_opt2(build_opt2(slot_overrides={0: slot(0, dets=[d] * 4)}))
-    assert any(m.code == "stable_flag_differs" for m in recheck_frame(f, P))
+    assert f.slots[0].host_invalid == "verified_flags_not_pass"
+    assert f.science_sample(0, 0) is None
+    assert recheck_frame(f, P) == []  # invalid slots are skipped, not double counted
 
 
-def test_saturation_flag_on_verified_value():
+def test_saturation_flag_on_verified_value_closes_science():
     d = det(flags=0x1C | o.DF_SAT_ON)
     f = o.parse_opt2(build_opt2(slot_overrides={0: slot(0, dets=[d] * 4)}))
-    assert any(m.code == "saturated_but_verified" for m in recheck_frame(f, P))
+    assert f.slots[0].host_invalid == "verified_but_saturated"
+    assert f.science_sample(0, 0) is None
 
 
-def test_witness_none_on_verified_slot():
+def test_witness_none_on_verified_slot_closes_science():
     f = o.parse_opt2(build_opt2(slot_overrides={0: slot(0, witness=0xFF)}))
-    assert any(m.code == "verified_slot_without_witness" for m in recheck_frame(f, P))
+    assert f.slots[0].host_invalid == "verified_slot_without_witness"
+    assert f.science_sample(0, 0) is None
+
+
+def test_stable_flag_set_but_host_says_unstable_is_caught():
+    # stab_q=100 -> 10*100 > 16*stable_k, so STABLE flag is a false pass
+    d = det(stab=100)
+    f = o.parse_opt2(build_opt2(slot_overrides={0: slot(0, dets=[d] * 4)}))
+    assert f.slots[0].host_invalid is None
+    assert any(m.code == "false_pass" for m in recheck_frame(f, P))
 
 
 def test_gate_config_id_mismatch():
@@ -81,3 +93,15 @@ def test_engineering_not_applicable():
     f = o.parse_opt2(build_opt2([eng_slot(i) for i in range(20)],
                                 frame_flags=o.FF_ENGINEERING_UNGATED, gate_config_id=0))
     assert recheck_frame(f, P) == []
+
+
+def test_step_z_with_variance_and_unequal_counts():
+    # s_on = s_off = 8 counts (sd_q4=128); n_on=4, n_off=16
+    # se = sqrt(64/4 + 64/16) = sqrt(20) = 4.4721 ; threshold = 5.0 * se = 22.36
+    def run(sum_on):
+        return evaluate(4, 16, sum_on, 0, 128, 128, 0, P, 50)
+    assert not run(88).step_z_pass  # diff 22.0 < 22.36
+    assert run(92).step_z_pass      # diff 23.0 >= 22.36
+    # swapping the counts changes se only through the correct term: n_on=16, n_off=4 gives the same se
+    assert evaluate(16, 4, 16 * 23, 0, 128, 128, 0, P, 50).step_z_pass
+    assert not evaluate(16, 4, 16 * 22, 0, 128, 128, 0, P, 50).step_z_pass
