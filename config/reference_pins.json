@@ -1,0 +1,57 @@
+{
+  "schema": "noctinirs_host.reference_pins/1",
+  "firmware_repo": "YerriSuyudHasim/noctinirs-2",
+  "firmware_commit": "e42f2bc9b453b223bf4557516f63fcceadfddbc8",
+  "firmware_branch": "cursor/n3-single-clock-72a4",
+  "pinned_files": {
+    "docs/drafts/OPTICAL_DATA_CONTRACT_DRAFT.md": {
+      "version": "v0.4.3",
+      "sha256": "4dd2b89b2ac900dfe814b6cd97e504b3227b163eee8487987f9e4e4b84c31c6f",
+      "superseded_v0.3_sha256": "b2bc59aaf8ffd852fba55bf8bbc3618aab4e08fe1430ab35cba10f5985c9df9e",
+      "superseded_v0.4.1_sha256": "f38755c474b664ab77d28cedb977634c1eeed5f6c16ccd8c3e66fb4284b97ad7"
+    },
+    "docs/adr/0004-host-protocol.md": {
+      "status": "Proposed",
+      "sha256": "f3db72a455df3cf0552f2401116a9f8dcf99cc7430a8539a86fee4d9513358e3",
+      "note": "hash recorded at the superseded commit; not re-checked at the new commit"
+    },
+    "config/optical_geometry_v1.json": {
+      "sha256": "035c00f1c5f23b36fff34564c1bee07b8e74185964e19cadb7d139be860c39ff",
+      "host_copy": "config/optical_geometry_v1.json",
+      "status": "draft_pending_caliper (distances not locked until the Owner checks them with calipers)"
+    }
+  },
+  "golden_vectors": {
+    "firmware_paths_dir": "test/golden and config",
+    "download_base": "https://raw.githubusercontent.com/YerriSuyudHasim/noctinirs-2/e42f2bc9b453b223bf4557516f63fcceadfddbc8/",
+    "files": {
+      "optical_frame_vectors.json": {
+        "path": "test/golden/optical_frame_vectors.json",
+        "sha256": "5f73f43c9e2331530095189ff97ec3ea7dedbad989be9c83295955c57e8fcb78"
+      },
+      "optical_gate_vectors.json": {
+        "path": "test/golden/optical_gate_vectors.json",
+        "sha256": "a84b843d8eb9590b0175d3b7914e58e8b8549a599c2d1d51f7fce805df6cdd08"
+      },
+      "optical_geometry_v1.json": {
+        "path": "config/optical_geometry_v1.json",
+        "sha256": "035c00f1c5f23b36fff34564c1bee07b8e74185964e19cadb7d139be860c39ff"
+      },
+      "optical_gate_configs.json": {
+        "path": "config/optical_gate_configs.json",
+        "sha256": "614f9dd1bbcd18ee1fee654a8634b1e12e147c4f748fb9409975118bd81bc11a"
+      }
+    }
+  },
+  "verified_against_c_implementation": false,
+  "firmware_commit_note": "Merge of PR #87 (contract v0.4.3, used<=available rule, 61 frame vectors). Gate vectors, gate configs and geometry have the same sha256 as at the superseded commit.",
+  "superseded_commit": "2a8eaa16254497113df7e98d34ee413e3141d9de",
+  "verified_against_golden_vectors": true,
+  "evidence_note": "Golden vectors are frozen outputs of the C codec. The host is tested against them (host/unit class); the C code itself is not run here.",
+  "retired": {
+    "docs/drafts/optical_geometry_v1.draft.json": {
+      "sha256": "ddc2a094273e447128d0d99ffacb3c2b48b62a89452956b257d592adb42a3c23",
+      "note": "old draft geometry, no longer used by the host"
+    }
+  }
+}
