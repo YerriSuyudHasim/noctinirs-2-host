@@ -68,10 +68,12 @@ def test_slot_index_mismatch_rejected():
 @pytest.mark.parametrize("name,s,why", [
     # unknown bits and extra host rules: only this slot becomes host-INVALID
     ("quality>4", slot(2, quality=5), "unknown_quality"),
+    # C clears det_flags bits 6/7 when it normalises an unknown slot: GATE_OFF is not fatal
+    ("unknown quality + GATE_OFF", slot(2, quality=5, dets=[det(flags=0x5C)] + [det()] * 3),
+     "unknown_quality"),
     ("reserved reason bit", slot(2, quality=0, reason=1 << 12, mask=0, witness=0xFF,
                                  dets=[blank_det()] * 4), "unknown_reason_bits"),
     ("reserved det_flags bit", slot(2, dets=[det(flags=0x9C)] + [det()] * 3), "bad_det_flags"),
-    ("GATE_OFF in gated frame", slot(2, dets=[det(flags=0x5C)] + [det()] * 3), "bad_det_flags"),
     ("verified without witness", slot(2, witness=0xFF), "verified_slot_without_witness"),
     ("verified with SAT_ON", slot(2, dets=[det(flags=0x1C | 0x01)] + [det()] * 3),
      "verified_but_saturated"),
@@ -102,8 +104,25 @@ def test_inconsistent_slot_is_invalid_not_science(name, s, why):
                                           dets=[blank_det()] * 4), "reason_quality"),
     ("quality 1 with reason", slot(2, quality=1, reason=1 << 10), "reason_quality"),
     ("quality 2 with reason bit 0", slot(2, quality=2, reason=1), "reason_quality"),
-    ("stop and warmup together", slot(2, quality=3, reason=(1 << 6) | (1 << 9), mask=0,
-                                      witness=0xFF, dets=[blank_det()] * 4), "reason_quality"),
+    ("stop and warmup, quality 4 (STOP has priority)",
+     slot(2, quality=4, reason=(1 << 6) | (1 << 9), mask=0, witness=0xFF,
+          dets=[blank_det()] * 4), "reason_quality"),
+    ("GATE_OFF in gated frame", slot(2, dets=[det(flags=0x5C)] + [det()] * 3),
+     "slot_inconsistent"),
+    ("verified, n_on=3 but stab_q != 0xFF", slot(2, n_on=3, avail_on=3), "stab_n_lt_4"),
+    ("blank slot, n_off=3 but stab_q != 0xFF",
+     slot(2, quality=0, reason=1 << 10, mask=0, witness=0xFF, n_off=3,
+          dets=[dict(blank_det(), stab=8)] + [blank_det()] * 3), "slot_inconsistent"),
+    # unknown bits do not hide the checks that survive the C normalisation
+    ("unknown quality + used > available", slot(2, quality=5, n_on=10, avail_on=9),
+     "used_gt_available"),
+    ("reserved reason bit + used > available",
+     slot(2, quality=0, reason=1 << 12, mask=0, witness=0xFF, dets=[blank_det()] * 4,
+          n_off=5, avail_off=4), "used_gt_available"),
+    ("reserved det_flags bit + used > available",
+     slot(2, dets=[det(flags=0x9C)] + [det()] * 3, n_on=10, avail_on=9), "used_gt_available"),
+    ("unknown quality + STOP reason bit", slot(2, quality=5, reason=1 << 6),
+     "reason_quality"),
     ("verified with n_on=1", slot(2, n_on=1), "verified_n_lt_2"),
     ("verified with n_off=0", slot(2, n_off=0), "verified_n_lt_2"),
     ("n_on used > available", slot(2, n_on=10, avail_on=9), "used_gt_available"),
@@ -126,6 +145,59 @@ def test_inconsistent_slot_is_invalid_not_science(name, s, why):
 def test_codec_invalid_slot_rejects_whole_packet(name, s, code):
     with pytest.raises(WireError) as ei:
         o.parse_opt2(build_opt2(slot_overrides={2: s}))
+    assert ei.value.code == code, name
+
+
+def test_stop_and_warmup_together_with_quality_3_is_accepted():
+    # C gives STOP priority over WARMUP, so quality 3 is the matching quality
+    s = slot(2, quality=3, reason=(1 << 6) | (1 << 9), mask=0, witness=0xFF,
+             dets=[blank_det()] * 4)
+    f = o.parse_opt2(build_opt2(slot_overrides={2: s}))
+    assert f.slots[2].host_invalid is None and f.science_mask(2) == 0
+
+
+def test_short_n_with_stab_ff_is_accepted():
+    s = slot(2, n_on=3, avail_on=3, dets=[det(stab=0xFF)] * 4)
+    f = o.parse_opt2(build_opt2(slot_overrides={2: s}))
+    # accepted by the codec; the host still refuses science for stab_q 0xFF
+    assert f.slots[2].host_invalid == "verified_with_unusable_stab_q"
+    assert f.science_mask(2) == 0
+
+
+@pytest.mark.parametrize("engineering", [False, True])
+def test_opt2_sample_count_zero_rejects_packet(engineering):
+    p = bytearray(build_opt2(**(dict(slots=[eng_slot(i) for i in range(20)],
+                                     frame_flags=o.FF_ENGINEERING_UNGATED, gate_config_id=0)
+                                if engineering else {})))
+    p[12:14] = (0).to_bytes(2, "little")
+    with pytest.raises(WireError) as ei:
+        o.parse_opt2(bytes(p))
+    assert ei.value.code == "sample_count"
+
+
+def _eng(first):
+    return build_opt2([first] + [eng_slot(i) for i in range(1, 20)],
+                      frame_flags=o.FF_ENGINEERING_UNGATED, gate_config_id=0)
+
+
+@pytest.mark.parametrize("name,s,code", [
+    ("n_on used but sum_on blank",
+     slot(0, mask=0, witness=0xFF, dets=[dict(det(flags=0x40), sum_on=INT32_MIN)] + [det(flags=0x40)] * 3),
+     "engineering_rule"),
+    ("n_on=0 but sum_on present", slot(0, n_on=0, mask=0, witness=0xFF,
+                                       dets=[det(flags=0x40, stab=0xFF)] * 4),
+     "engineering_rule"),
+    ("n_off<2 but sd_off present",
+     slot(0, n_off=1, mask=0, witness=0xFF, dets=[det(flags=0x40, stab=0xFF)] * 4),
+     "engineering_rule"),
+    ("quality 2 with reason bit 0", slot(0, quality=2, reason=1, mask=0, witness=0xFF,
+                                          dets=[det(flags=0x40)] * 4), "reason_quality"),
+    ("n_on=3 with stab_q != 0xFF", slot(0, n_on=3, avail_on=3, mask=0, witness=0xFF,
+                                         dets=[det(flags=0x40)] * 4), "stab_n_lt_4"),
+])
+def test_engineering_sentinel_reason_and_stab_rules_reject_packet(name, s, code):
+    with pytest.raises(WireError) as ei:
+        o.parse_opt2(_eng(s))
     assert ei.value.code == code, name
 
 

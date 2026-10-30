@@ -10,7 +10,7 @@ Status: **step 1** (geometry loader, wire parsers, gate recheck). No device I/O,
 
 ## Evidence status
 
-Host/unit class. The parsers and the gate check pass the shared golden vectors of the firmware repository (35 frame vectors, 26 gate vectors, pinned by sha256 in [config/reference_pins.json](config/reference_pins.json)). The C code itself is **not run** here, and nothing is tested on a device. The vectors are not copied into this repository: CI downloads them from the pinned firmware commit. To run them locally set `NN2_GOLDEN_DIR` to a folder with the four files; without it those tests are skipped.
+Host/unit class. The parsers and the gate check pass the shared golden vectors of the firmware repository (61 frame vectors, 26 gate vectors, pinned by sha256 in [config/reference_pins.json](config/reference_pins.json)). The C code itself is **not run** here, and nothing is tested on a device. The vectors are not copied into this repository: CI downloads them from the pinned firmware commit. To run them locally set `NN2_GOLDEN_DIR` to a folder with the four files; without it those tests are skipped.
 
 ## Run on Windows (PowerShell)
 
