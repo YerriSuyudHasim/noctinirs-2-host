@@ -64,3 +64,31 @@ def test_not_json(tmp_path):
     p.write_text("{nope")
     with pytest.raises(GeometryError):
         load_geometry(p)
+
+
+def _bad_value(g, key_path, value):
+    node = g
+    for k in key_path[:-1]:
+        node = node[k]
+    node[key_path[-1]] = value
+
+
+@pytest.mark.parametrize("path,value", [
+    (("detectors", 0, "ain"), 2.9),
+    (("detectors", 0, "ain"), True),
+    (("detectors", 0, "ain"), "2"),
+    (("channels", 0, "ain"), 3.5),
+    (("geometry_map_id",), -1),
+    (("geometry_map_id",), 65536),
+    (("geometry_map_id",), 1.5),
+    (("geometry_map_id",), True),
+    (("channels", 0, "sd_mm"), float("nan")),
+    (("channels", 0, "sd_mm"), float("inf")),
+    (("channels", 0, "sd_mm"), -5),
+    (("channels", 0, "sd_mm"), 0),
+    (("channels", 0, "sd_mm"), "30"),
+    (("sources", 0, "slot", "735"), 0.5),
+])
+def test_malformed_values_rejected(tmp_path, path, value):
+    with pytest.raises(GeometryError):
+        load_geometry(_mutated(tmp_path, lambda g: _bad_value(g, path, value)))

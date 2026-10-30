@@ -58,6 +58,7 @@ DF_DIFF_NEGATIVE = 1 << 5
 DF_GATE_OFF = 1 << 6
 DF_RESERVED_MASK = 0x80
 DF_GATE_BITS = DF_STEP_Z_PASS | DF_STABLE_PASS | DF_FLOOR_PASS | DF_DIFF_NEGATIVE
+DF_PASS_BITS = DF_STEP_Z_PASS | DF_STABLE_PASS | DF_FLOOR_PASS
 
 # frame_flags
 FF_WARMUP = 1 << 0
@@ -234,6 +235,8 @@ def _slot_problem(f_flags_ok: bool, quality: int, reason: int, mask: int, witnes
         if not (d.fully_blank or d.fully_present):
             return "partial_blank"
     if quality in (Q_VALID_MINIMUM, Q_VALID_TARGET):
+        if witness == WITNESS_NONE:
+            return "verified_slot_without_witness"
         for i, d in enumerate(dets):
             verified = (mask >> i) & 1
             if verified and not d.fully_present:
@@ -242,6 +245,13 @@ def _slot_problem(f_flags_ok: bool, quality: int, reason: int, mask: int, witnes
                 return "unverified_value_present"
             if verified and (n_on < 2 or n_off < 2):
                 return "verified_with_too_few_samples"
+            if verified and d.det_flags & (DF_SAT_ON | DF_SAT_OFF):
+                return "verified_but_saturated"
+            if verified and (d.det_flags & DF_PASS_BITS != DF_PASS_BITS
+                             or d.det_flags & DF_DIFF_NEGATIVE):
+                return "verified_flags_not_pass"
+            if verified and d.stab_q >= STAB_TRUNCATED:
+                return "verified_with_unusable_stab_q"
     else:
         if mask:
             return "values_present_but_not_verified"
@@ -317,6 +327,10 @@ def parse_opt2(payload: bytes) -> Opt2Frame:
             for d_i, d in enumerate(dets):
                 if d.fully_blank and d.stab_q != STAB_NONE:
                     warnings.append(f"slot {i} AIN{d_i}: blank detector without stab_q=0xFF")
+        for d_i, d in enumerate(dets):
+            if SD_CLIPPED in (d.sd_on_q4, d.sd_off_q4):
+                warnings.append(f"slot {i} AIN{d_i}: sd clipped (>= 4095.875 counts), "
+                                "a bound and not an exact value")
         slots.append(SlotRecord(i, quality, reason, n_on, n_off, a_on, a_off, late_on,
                                 late_off, witness, mask, tuple(dets), invalid))
     return Opt2Frame(adc, epoch, fseq, first_seq, sample_count, fflags, geo_id, gate_id,

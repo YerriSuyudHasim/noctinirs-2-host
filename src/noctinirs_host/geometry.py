@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -86,6 +87,24 @@ class Geometry:
         return self.pd_for_ain(ain).side != src.side
 
 
+def _strict_int(v: object, what: str, lo: int, hi: int) -> int:
+    """Accept only real JSON integers (not bool, not 2.9, not strings) inside [lo, hi]."""
+    if type(v) is not int:
+        raise ValueError(f"{what} must be an integer, got {v!r}")
+    if not lo <= v <= hi:
+        raise ValueError(f"{what} must be in {lo}..{hi}, got {v}")
+    return v
+
+
+def _positive_finite(v: object, what: str) -> float:
+    if type(v) not in (int, float):
+        raise ValueError(f"{what} must be a number, got {v!r}")
+    f = float(v)
+    if not math.isfinite(f) or f <= 0:
+        raise ValueError(f"{what} must be finite and > 0, got {v!r}")
+    return f
+
+
 def load_geometry(path: str | Path) -> Geometry:
     raw = Path(path).read_bytes()
     sha = hashlib.sha256(raw).hexdigest()
@@ -97,16 +116,21 @@ def load_geometry(path: str | Path) -> Geometry:
     try:
         if g.get("schema") != SCHEMA:
             problems.append(f"schema must be {SCHEMA}")
-        dets = tuple(DetectorInfo(d["pd"], int(d["ain"]), d["side"]) for d in g["detectors"])
-        srcs = tuple(SourceInfo(s["id"], s["side"], {k: int(v) for k, v in s["slot"].items()})
+        dets = tuple(DetectorInfo(d["pd"], _strict_int(d["ain"], "detector ain", 0, 3), d["side"])
+                     for d in g["detectors"])
+        srcs = tuple(SourceInfo(s["id"], s["side"],
+                                {k: _strict_int(v, "slot", 0, 19) for k, v in s["slot"].items()})
                      for s in g["sources"])
-        chans = tuple(ChannelInfo(c["name"], c["source"], c["pd"], int(c["ain"]),
-                                  float(c["sd_mm"]), c["kind"]) for c in g["channels"])
-        ain_to_pd = {int(k): v for k, v in g["adc"]["ain_to_pd"].items()}
-        map_id = int(g["geometry_map_id"])
+        chans = tuple(ChannelInfo(c["name"], c["source"], c["pd"],
+                                  _strict_int(c["ain"], "channel ain", 0, 3),
+                                  _positive_finite(c["sd_mm"], "sd_mm"), c["kind"])
+                      for c in g["channels"])
+        ain_to_pd = {_strict_int(int(k), "ain_to_pd key", 0, 3): v
+                     for k, v in g["adc"]["ain_to_pd"].items()}
+        map_id = _strict_int(g["geometry_map_id"], "geometry_map_id", 0, 0xFFFF)
         status = str(g["status"])
     except (KeyError, TypeError, ValueError, AttributeError) as e:
-        raise GeometryError([f"missing or malformed field: {e!r}"]) from e
+        raise GeometryError([f"missing or malformed field: {e}"]) from e
 
     if sorted(d.ain for d in dets) != [0, 1, 2, 3]:
         problems.append("detectors must cover AIN 0..3 exactly once")
