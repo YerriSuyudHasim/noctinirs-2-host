@@ -1,13 +1,14 @@
 {
   "schema": "noctinirs_host.reference_pins/1",
   "firmware_repo": "YerriSuyudHasim/noctinirs-2",
-  "firmware_commit": "2a8eaa16254497113df7e98d34ee413e3141d9de",
+  "firmware_commit": "e42f2bc9b453b223bf4557516f63fcceadfddbc8",
   "firmware_branch": "cursor/n3-single-clock-72a4",
   "pinned_files": {
     "docs/drafts/OPTICAL_DATA_CONTRACT_DRAFT.md": {
-      "version": "v0.4.1",
-      "sha256": "f38755c474b664ab77d28cedb977634c1eeed5f6c16ccd8c3e66fb4284b97ad7",
-      "superseded_v0.3_sha256": "b2bc59aaf8ffd852fba55bf8bbc3618aab4e08fe1430ab35cba10f5985c9df9e"
+      "version": "v0.4.3",
+      "sha256": "4dd2b89b2ac900dfe814b6cd97e504b3227b163eee8487987f9e4e4b84c31c6f",
+      "superseded_v0.3_sha256": "b2bc59aaf8ffd852fba55bf8bbc3618aab4e08fe1430ab35cba10f5985c9df9e",
+      "superseded_v0.4.1_sha256": "f38755c474b664ab77d28cedb977634c1eeed5f6c16ccd8c3e66fb4284b97ad7"
     },
     "docs/adr/0004-host-protocol.md": {
       "status": "Proposed",
@@ -22,11 +23,11 @@
   },
   "golden_vectors": {
     "firmware_paths_dir": "test/golden and config",
-    "download_base": "https://raw.githubusercontent.com/YerriSuyudHasim/noctinirs-2/2a8eaa16254497113df7e98d34ee413e3141d9de/",
+    "download_base": "https://raw.githubusercontent.com/YerriSuyudHasim/noctinirs-2/e42f2bc9b453b223bf4557516f63fcceadfddbc8/",
     "files": {
       "optical_frame_vectors.json": {
         "path": "test/golden/optical_frame_vectors.json",
-        "sha256": "2258c153420a9be03a6b82d0e611deb5345c2827224a7c0b27fea4eb42818722"
+        "sha256": "5f73f43c9e2331530095189ff97ec3ea7dedbad989be9c83295955c57e8fcb78"
       },
       "optical_gate_vectors.json": {
         "path": "test/golden/optical_gate_vectors.json",
@@ -43,8 +44,8 @@
     }
   },
   "verified_against_c_implementation": false,
-  "firmware_commit_note": "Merge of PR #85 (contract v0.4.1). Golden vectors were added in PR #84 (d119f851). The firmware reviewer checked firmware d0fcbeb: the four golden/config files there have the same sha256 as at this commit.",
-  "superseded_commit": "2ccbbffb00ea735a1cd652d271e3a1bed463a25d",
+  "firmware_commit_note": "Merge of PR #87 (contract v0.4.3, used<=available rule, 61 frame vectors). Gate vectors, gate configs and geometry have the same sha256 as at the superseded commit.",
+  "superseded_commit": "2a8eaa16254497113df7e98d34ee413e3141d9de",
   "verified_against_golden_vectors": true,
   "evidence_note": "Golden vectors are frozen outputs of the C codec. The host is tested against them (host/unit class); the C code itself is not run here.",
   "retired": {
