@@ -5,7 +5,7 @@ PC host application for the NoctiNIRS 2 fNIRS device.
 Status: **step 1** (geometry loader, wire parsers, gate recheck). No device I/O, no UI. Governance rules for contributors and AI agents are in [AGENTS.md](AGENTS.md); the project record is [project.yaml](project.yaml).
 
 - Firmware and the device protocol: [YerriSuyudHasim/noctinirs-2](https://github.com/YerriSuyudHasim/noctinirs-2)
-- Language: Python. UI framework to be decided in host ADR-0001.
+- Language: Python. Reference version pinned to **3.12.7** (CI and `.python-version`); the code is also tested locally on 3.13. `requires-python = ">=3.11"` is the lowest allowed version. UI framework to be decided in host ADR-0001.
 - Non-clinical research prototype.
 
 ## Evidence status
