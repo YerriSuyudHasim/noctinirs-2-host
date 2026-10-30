@@ -29,13 +29,13 @@ def test_max_size():
 @pytest.mark.parametrize("kw,code", [
     (dict(raw_flags=0), "raw_flags"),
     (dict(raw_flags=5), "raw_flags"),
-    (dict(reserved=1), "reserved_prefix"),
+    (dict(reserved=1), "reserved"),
     (dict(samples=[raw_sample(phase=9, slot_idx=1)]), "raw_phase_class"),
     (dict(samples=[raw_sample(phase=0, slot_idx=3)]), "raw_slot_index"),
     (dict(samples=[raw_sample(phase=4, slot_idx=0xFF)]), "raw_slot_index"),
     (dict(samples=[raw_sample(phase=4, slot_idx=20)]), "raw_slot_index"),
     (dict(count=2), "raw_size"),
-    (dict(samples=[raw_sample()] * 101), "raw_sample_count"),
+    (dict(samples=[raw_sample()] * 101), "sample_count"),
     (dict(adc_source=3), "unknown_adc_source"),
 ])
 def test_raw_rejects(kw, code):

@@ -11,7 +11,8 @@ have failed). It cannot see a false REJECTION, because rejected values are
 blanked and never transmitted. False rejections are measurable only in
 ENGINEERING mode and by offline RAW (dark-box) analysis.
 
-NOT verified against the C implementation (no golden vectors yet).
+Checked bit for bit against the 26 shared gate golden vectors (tests/test_golden.py).
+The C code itself is not run here.
 """
 
 from __future__ import annotations

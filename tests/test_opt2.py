@@ -50,7 +50,7 @@ def test_layout1_rejected_with_message():
     (dict(adc_source=2), "unknown_adc_source"),
     (dict(slot_count=19), "bad_counts"),
     (dict(det_count=3), "bad_counts"),
-    (dict(reserved=1), "reserved_prefix"),
+    (dict(reserved=1), "reserved"),
 ])
 def test_frame_level_rejects(kw, code):
     with pytest.raises(WireError) as ei:
@@ -66,26 +66,12 @@ def test_slot_index_mismatch_rejected():
 
 
 @pytest.mark.parametrize("name,s,why", [
+    # unknown bits and extra host rules: only this slot becomes host-INVALID
     ("quality>4", slot(2, quality=5), "unknown_quality"),
     ("reserved reason bit", slot(2, quality=0, reason=1 << 12, mask=0, witness=0xFF,
                                  dets=[blank_det()] * 4), "unknown_reason_bits"),
-    ("stop reason with quality 0", slot(2, quality=0, reason=1 << 6, mask=0, witness=0xFF,
-                                        dets=[blank_det()] * 4), "reason_quality_mismatch"),
-    ("warmup reason with quality 3", slot(2, quality=3, reason=1 << 9, mask=0, witness=0xFF,
-                                          dets=[blank_det()] * 4), "reason_quality_mismatch"),
-    ("quality 1 with reason", slot(2, quality=1, reason=1 << 10), "reason_quality_mismatch"),
     ("reserved det_flags bit", slot(2, dets=[det(flags=0x9C)] + [det()] * 3), "bad_det_flags"),
     ("GATE_OFF in gated frame", slot(2, dets=[det(flags=0x5C)] + [det()] * 3), "bad_det_flags"),
-    ("bad witness", slot(2, witness=7), "bad_witness"),
-    ("bad mask", slot(2, mask=0x1F), "bad_verified_mask"),
-    ("value present but unverified", slot(2, mask=0b0001, dets=[det()] * 4),
-     "unverified_value_present"),
-    ("verified but blank", slot(2, mask=0b0001, dets=[blank_det()] * 4), "verified_but_blank"),
-    ("quality 0 with values", slot(2, quality=0, reason=1 << 10, mask=0, witness=0xFF,
-                                   dets=[det()] * 4), "values_present_but_not_verified"),
-    ("partial blank", slot(2, dets=[dict(det(), sum_off=INT32_MIN)] + [det()] * 3),
-     "partial_blank"),
-    ("verified with n=1", slot(2, n_on=1), "verified_with_too_few_samples"),
     ("verified without witness", slot(2, witness=0xFF), "verified_slot_without_witness"),
     ("verified with SAT_ON", slot(2, dets=[det(flags=0x1C | 0x01)] + [det()] * 3),
      "verified_but_saturated"),
@@ -108,18 +94,62 @@ def test_inconsistent_slot_is_invalid_not_science(name, s, why):
     assert any("slot 2" in w for w in f.warnings)
 
 
+@pytest.mark.parametrize("name,s,code", [
+    # the C codec rejects the whole packet in these cases (golden vectors agree)
+    ("stop reason with quality 0", slot(2, quality=0, reason=1 << 6, mask=0, witness=0xFF,
+                                        dets=[blank_det()] * 4), "reason_quality"),
+    ("warmup reason with quality 3", slot(2, quality=3, reason=1 << 9, mask=0, witness=0xFF,
+                                          dets=[blank_det()] * 4), "reason_quality"),
+    ("quality 1 with reason", slot(2, quality=1, reason=1 << 10), "reason_quality"),
+    ("quality 2 with reason bit 0", slot(2, quality=2, reason=1), "reason_quality"),
+    ("stop and warmup together", slot(2, quality=3, reason=(1 << 6) | (1 << 9), mask=0,
+                                      witness=0xFF, dets=[blank_det()] * 4), "reason_quality"),
+    ("verified with n_on=1", slot(2, n_on=1), "verified_n_lt_2"),
+    ("verified with n_off=0", slot(2, n_off=0), "verified_n_lt_2"),
+    ("bad witness", slot(2, witness=7), "slot_inconsistent"),
+    ("bad mask", slot(2, mask=0x1F), "slot_inconsistent"),
+    ("value present but unverified", slot(2, mask=0b0001, dets=[det()] * 4),
+     "slot_inconsistent"),
+    ("verified but blank", slot(2, mask=0b0001, dets=[blank_det()] * 4), "slot_inconsistent"),
+    ("quality 0 with values", slot(2, quality=0, reason=1 << 10, mask=0, witness=0xFF,
+                                   dets=[det()] * 4), "slot_inconsistent"),
+    ("partial blank", slot(2, dets=[dict(det(), sum_off=INT32_MIN)] + [det()] * 3),
+     "slot_inconsistent"),
+    ("masked detector without stab 0xFF",
+     slot(2, mask=0b1110, dets=[dict(blank_det(), stab=5)] + [det()] * 3), "slot_inconsistent"),
+])
+def test_codec_invalid_slot_rejects_whole_packet(name, s, code):
+    with pytest.raises(WireError) as ei:
+        o.parse_opt2(build_opt2(slot_overrides={2: s}))
+    assert ei.value.code == code, name
+
+
+def test_reason_names_match_contract_section_4_3():
+    names = [o.REASON_UNDER_K_ON, o.REASON_UNDER_K_OFF, o.REASON_LED_ON_MISSING,
+             o.REASON_LED_OFF_MISSING, o.REASON_RUNTIME_TIMING, o.REASON_ADS_INTEGRITY,
+             o.REASON_STOP_ABORT, o.REASON_STALE_EPOCH, o.REASON_INTERNAL,
+             o.REASON_STARTUP_WARMUP, o.REASON_NO_WITNESS, o.REASON_WITNESS_UNSTABLE]
+    assert names == [1 << i for i in range(12)]
+
+
+@pytest.mark.parametrize("bit", range(12))
+def test_every_known_reason_bit_with_valid_quality_is_rejected(bit):
+    with pytest.raises(WireError) as ei:
+        o.parse_opt2(build_opt2(slot_overrides={2: slot(2, quality=2, reason=1 << bit)}))
+    assert ei.value.code == "reason_quality"
+
+
+def test_science_sample_never_claims_k_check_passed():
+    f = o.parse_opt2(build_opt2())
+    assert f.science_sample(0, 0).quality_vs_k == "not_checked"
+
+
 def test_stop_and_warmup_slots_are_valid_holes():
     stop = slot(1, quality=3, reason=1 << 6, mask=0, witness=0xFF, dets=[blank_det()] * 4)
     warm = slot(2, quality=4, reason=1 << 9, mask=0, witness=0xFF, dets=[blank_det()] * 4)
     f = o.parse_opt2(build_opt2(slot_overrides={1: stop, 2: warm}))
     assert f.slots[1].host_invalid is None and f.slots[2].host_invalid is None
     assert f.science_mask(1) == 0 and f.science_mask(2) == 0 and not f.warnings
-
-
-def test_blank_detector_without_ff_stab_warns_but_stays_valid():
-    d = dict(blank_det(), stab=5)
-    f = o.parse_opt2(build_opt2(slot_overrides={0: slot(0, mask=0b1110, dets=[d] + [det()] * 3)}))
-    assert f.science_mask(0) == 0b1110 and any("stab_q=0xFF" in w for w in f.warnings)
 
 
 def test_engineering_frame_keeps_values_but_is_never_science():
@@ -130,18 +160,34 @@ def test_engineering_frame_keeps_values_but_is_never_science():
     assert f.slots[0].detectors[0].sum_on == 10000  # not blanked on the host
 
 
-def test_engineering_rule_violations_only_warn():
-    bad = slot(0, mask=0x01, witness=1, dets=[det(flags=0x1C)] * 4)
-    f = o.parse_opt2(build_opt2([bad] + [eng_slot(i) for i in range(1, 20)],
+@pytest.mark.parametrize("name,s", [
+    ("verified_mask != 0", slot(0, mask=0x01, witness=0xFF, dets=[det(flags=0x40)] * 4)),
+    ("witness != 0xFF", slot(0, mask=0, witness=1, dets=[det(flags=0x40)] * 4)),
+    ("reason bit 10", slot(0, mask=0, witness=0xFF, reason=1 << 10, quality=0,
+                           dets=[det(flags=0x40)] * 4)),
+    ("gate bits set", slot(0, mask=0, witness=0xFF, dets=[det(flags=0x5C)] * 4)),
+    ("GATE_OFF missing", slot(0, mask=0, witness=0xFF, dets=[det(flags=0x00)] * 4)),
+])
+def test_engineering_rule_violations_reject_packet(name, s):
+    with pytest.raises(WireError) as ei:
+        o.parse_opt2(build_opt2([s] + [eng_slot(i) for i in range(1, 20)],
                                 frame_flags=o.FF_ENGINEERING_UNGATED, gate_config_id=0))
-    assert not f.is_science and f.science_mask(0) == 0 and len(f.warnings) >= 3
+    assert ei.value.code == "engineering_rule", name
 
 
-def test_engineering_flag_and_gate_id_disagree_is_non_science():
-    f = o.parse_opt2(build_opt2(frame_flags=o.FF_ENGINEERING_UNGATED, gate_config_id=1))
-    assert not f.is_science and any("disagree" in w for w in f.warnings)
-    f2 = o.parse_opt2(build_opt2(frame_flags=0, gate_config_id=0))
-    assert not f2.is_science
+@pytest.mark.parametrize("flags,gid", [(o.FF_ENGINEERING_UNGATED, 1), (0, 0)])
+def test_engineering_flag_and_gate_id_disagree_rejects_packet(flags, gid):
+    with pytest.raises(WireError) as ei:
+        o.parse_opt2(build_opt2(frame_flags=flags, gate_config_id=gid))
+    assert ei.value.code == "engineering_mismatch"
+
+
+def test_engineering_unknown_bits_only_warn_and_keep_values():
+    s = slot(0, quality=5, mask=0, witness=0xFF, reason=1 << 12, dets=[det(flags=0x40)] * 4)
+    f = o.parse_opt2(build_opt2([s] + [eng_slot(i) for i in range(1, 20)],
+                                frame_flags=o.FF_ENGINEERING_UNGATED, gate_config_id=0))
+    assert not f.is_science and f.science_mask(0) == 0 and len(f.warnings) >= 2
+    assert f.slots[0].detectors[0].sum_on == 10000
 
 
 @pytest.mark.parametrize("flag", [o.FF_STARTING_GATE, o.FF_WARMUP])
