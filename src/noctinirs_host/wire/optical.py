@@ -1,7 +1,12 @@
 """FRAME payload parsers: layout 2 (OPT2) and layout 3 (RAW).
 
-Source of truth: firmware optical data contract, v0.4.1 (pending, uncommitted;
-see config/reference_pins.json). NOT verified against the C implementation.
+Source of truth: firmware optical data contract v0.4.1 (merged in the firmware
+repository, see config/reference_pins.json). Tested against the shared golden
+vectors (tests/test_golden.py); the C code itself is not run here.
+
+Rule: the host is exactly as strict as the C codec. Packets the codec rejects are
+rejected here (WireError, counted in wire/counters.py). Only unknown bits and a few
+extra host-side checks make a single slot host-INVALID.
 
 Safety rule enforced here: a value is science data only through
 `Opt2Frame.science_mask()` / `science_sample()`. Everything else (blank,
@@ -41,8 +46,16 @@ WITNESS_NONE = 0xFF
 # quality (contract v0.3/v0.4.1)
 Q_INVALID, Q_VALID_MINIMUM, Q_VALID_TARGET, Q_ABORTED_BY_STOP, Q_STARTUP_WARMUP = range(5)
 
-# reason bits whose numeric value is confirmed by the Owner's answers
+# reason bits 0..11 as named in contract v0.4.1 section 4.3 (confirmed by firmware reviewer)
+REASON_UNDER_K_ON = 1 << 0
+REASON_UNDER_K_OFF = 1 << 1
+REASON_LED_ON_MISSING = 1 << 2
+REASON_LED_OFF_MISSING = 1 << 3
+REASON_RUNTIME_TIMING = 1 << 4
+REASON_ADS_INTEGRITY = 1 << 5
 REASON_STOP_ABORT = 1 << 6
+REASON_STALE_EPOCH = 1 << 7
+REASON_INTERNAL = 1 << 8
 REASON_STARTUP_WARMUP = 1 << 9
 REASON_NO_WITNESS = 1 << 10
 REASON_WITNESS_UNSTABLE = 1 << 11
@@ -132,6 +145,9 @@ class ScienceSample:
     sd_off: float
     clipped_on: bool
     clipped_off: bool
+    # quality 1 vs 2 depends on k_min/k_target of the session, which the host does not
+    # have yet. Until it does, this is never reported as passed.
+    quality_vs_k: str = "not_checked"
 
 
 @dataclass(frozen=True)
@@ -208,74 +224,91 @@ def _int24(b0: int, b1: int, b2: int) -> int:
 
 
 def _slot_problem(f_flags_ok: bool, quality: int, reason: int, mask: int, witness: int,
-                  n_on: int, n_off: int, dets: list[DetectorRecord]) -> str | None:
-    """First reason a gated (science-path) slot must be treated INVALID, else None."""
+                  n_on: int, n_off: int,
+                  dets: list[DetectorRecord]) -> tuple[str, bool] | None:
+    """First problem of a gated slot as (detail, fatal), else None.
+
+    fatal=True: the C codec rejects the whole packet, so the host rejects it too.
+    fatal=False: only this slot becomes host-INVALID (unknown bits, or an extra
+    host-side consistency rule); the other slots stay usable.
+    """
     if not f_flags_ok:
-        return "unknown_frame_flags"
+        return "unknown_frame_flags", False
     if quality > Q_STARTUP_WARMUP:
-        return "unknown_quality"
+        return "unknown_quality", False
     if reason & ~REASON_KNOWN_MASK:
-        return "unknown_reason_bits"
+        return "unknown_reason_bits", False
     for d in dets:
         if d.det_flags & (DF_RESERVED_MASK | DF_GATE_OFF):
-            return "bad_det_flags"
+            return "bad_det_flags", False
     if witness != WITNESS_NONE and witness >= DET_COUNT:
-        return "bad_witness"
+        return "bad_witness", True
     if mask & 0xF0:
-        return "bad_verified_mask"
+        return "bad_verified_mask", True
     if reason:
         if reason & REASON_STOP_ABORT and reason & REASON_STARTUP_WARMUP:
-            return "reason_quality_mismatch"
+            return "reason_quality", True
         want = (Q_ABORTED_BY_STOP if reason & REASON_STOP_ABORT
                 else Q_STARTUP_WARMUP if reason & REASON_STARTUP_WARMUP
                 else Q_INVALID)
         if quality != want:
-            return "reason_quality_mismatch"
+            return "reason_quality", True
     for d in dets:
         if not (d.fully_blank or d.fully_present):
-            return "partial_blank"
+            return "partial_blank", True
+        if d.fully_blank and d.stab_q != STAB_NONE:
+            return "masked_stab_not_unknown", True
     if quality in (Q_VALID_MINIMUM, Q_VALID_TARGET):
-        if witness == WITNESS_NONE:
-            return "verified_slot_without_witness"
         for i, d in enumerate(dets):
             verified = (mask >> i) & 1
             if verified and not d.fully_present:
-                return "verified_but_blank"
+                return "verified_but_blank", True
             if not verified and not d.fully_blank:
-                return "unverified_value_present"
+                return "unverified_value_present", True
             if verified and (n_on < 2 or n_off < 2):
-                return "verified_with_too_few_samples"
-            if verified and d.det_flags & (DF_SAT_ON | DF_SAT_OFF):
-                return "verified_but_saturated"
-            if verified and (d.det_flags & DF_PASS_BITS != DF_PASS_BITS
-                             or d.det_flags & DF_DIFF_NEGATIVE):
-                return "verified_flags_not_pass"
-            if verified and d.stab_q >= STAB_TRUNCATED:
-                return "verified_with_unusable_stab_q"
+                return "verified_n_lt_2", True
+        # extra host-side rules (stricter than the codec): never science
+        if witness == WITNESS_NONE:
+            return "verified_slot_without_witness", False
+        for i, d in enumerate(dets):
+            if not (mask >> i) & 1:
+                continue
+            if d.det_flags & (DF_SAT_ON | DF_SAT_OFF):
+                return "verified_but_saturated", False
+            if d.det_flags & DF_PASS_BITS != DF_PASS_BITS or d.det_flags & DF_DIFF_NEGATIVE:
+                return "verified_flags_not_pass", False
+            if d.stab_q >= STAB_TRUNCATED:
+                return "verified_with_unusable_stab_q", False
     else:
-        if mask:
-            return "values_present_but_not_verified"
-        if not all(d.fully_blank for d in dets):
-            return "values_present_but_not_verified"
+        if mask or not all(d.fully_blank for d in dets):
+            return "values_present_but_not_verified", True
     return None
 
 
-def _engineering_warnings(i: int, quality: int, reason: int, mask: int, witness: int,
-                          dets: list[DetectorRecord]) -> list[str]:
-    w: list[str] = []
+def _engineering_check(i: int, mask: int, witness: int, reason: int,
+                       dets: list[DetectorRecord]) -> str | None:
+    """ENGINEERING fill rules the C codec enforces; a violation rejects the packet."""
     if mask:
-        w.append(f"slot {i}: ENGINEERING verified_mask != 0")
+        return f"slot {i}: ENGINEERING verified_mask != 0"
     if witness != WITNESS_NONE:
-        w.append(f"slot {i}: ENGINEERING witness_ain != 0xFF")
+        return f"slot {i}: ENGINEERING witness_ain != 0xFF"
     if reason & (REASON_NO_WITNESS | REASON_WITNESS_UNSTABLE):
-        w.append(f"slot {i}: ENGINEERING reason bit 10/11 set")
+        return f"slot {i}: ENGINEERING reason bit 10/11 set"
+    for a, d in enumerate(dets):
+        if d.det_flags & DF_GATE_BITS or not d.det_flags & DF_GATE_OFF:
+            return f"slot {i} AIN{a}: ENGINEERING det_flags gate bits set or GATE_OFF missing"
+    return None
+
+
+def _engineering_warnings(i: int, quality: int, reason: int,
+                          dets: list[DetectorRecord]) -> list[str]:
+    """Unknown bits in ENGINEERING frames: values kept as diagnostics, warn only."""
+    w: list[str] = []
     if reason & ~REASON_KNOWN_MASK:
         w.append(f"slot {i}: unknown reason bits")
     if quality > Q_STARTUP_WARMUP:
         w.append(f"slot {i}: unknown quality {quality}")
     for a, d in enumerate(dets):
-        if d.det_flags & DF_GATE_BITS or not d.det_flags & DF_GATE_OFF:
-            w.append(f"slot {i} AIN{a}: ENGINEERING det_flags gate bits / GATE_OFF wrong")
         if d.det_flags & DF_RESERVED_MASK:
             w.append(f"slot {i} AIN{a}: reserved det_flags bit set")
     return w
@@ -293,12 +326,13 @@ def parse_opt2(payload: bytes) -> Opt2Frame:
     if slot_count != SLOT_COUNT or det_count != DET_COUNT:
         raise WireError("bad_counts", f"slot_count={slot_count} det_count={det_count}")
     if reserved != 0:
-        raise WireError("reserved_prefix", "reserved prefix field is not 0")
+        raise WireError("reserved", "reserved prefix field is not 0")
+    engineering = bool(fflags & FF_ENGINEERING_UNGATED)
+    if engineering != (gate_id == 0):
+        raise WireError("engineering_mismatch",
+                        "ENGINEERING_UNGATED flag and gate_config_id==0 disagree")
 
     warnings: list[str] = []
-    engineering = bool(fflags & FF_ENGINEERING_UNGATED) or gate_id == 0
-    if bool(fflags & FF_ENGINEERING_UNGATED) != (gate_id == 0):
-        warnings.append("ENGINEERING flag and gate_config_id==0 disagree; frame treated as non-science")
     flags_ok = not (fflags & ~FF_KNOWN_MASK)
     if not flags_ok:
         warnings.append(f"unknown frame_flags bits (0x{fflags:04X})")
@@ -319,14 +353,21 @@ def parse_opt2(payload: bytes) -> Opt2Frame:
                                        payload[stab_off + i * DET_COUNT + d]))
         invalid = None
         if engineering:
-            warnings.extend(_engineering_warnings(i, quality, reason, mask, witness, dets))
+            bad = _engineering_check(i, mask, witness, reason, dets)
+            if bad:
+                raise WireError("engineering_rule", bad)
+            warnings.extend(_engineering_warnings(i, quality, reason, dets))
         else:
-            invalid = _slot_problem(flags_ok, quality, reason, mask, witness, n_on, n_off, dets)
-            if invalid:
+            problem = _slot_problem(flags_ok, quality, reason, mask, witness, n_on, n_off, dets)
+            if problem:
+                detail, fatal = problem
+                if fatal:
+                    # codes with their own counter keep their name; others are grouped
+                    code = detail if detail in ("reason_quality", "verified_n_lt_2") \
+                        else "slot_inconsistent"
+                    raise WireError(code, f"slot {i}: {detail}")
+                invalid = detail
                 warnings.append(f"slot {i}: treated INVALID ({invalid})")
-            for d_i, d in enumerate(dets):
-                if d.fully_blank and d.stab_q != STAB_NONE:
-                    warnings.append(f"slot {i} AIN{d_i}: blank detector without stab_q=0xFF")
         for d_i, d in enumerate(dets):
             if SD_CLIPPED in (d.sd_on_q4, d.sd_off_q4):
                 warnings.append(f"slot {i} AIN{d_i}: sd clipped (>= 4095.875 counts), "
@@ -347,7 +388,7 @@ def parse_raw(payload: bytes) -> RawPacket:
     if layout != LAYOUT_RAW:
         raise WireError("unsupported_layout", f"expected layout 3, got {layout}")
     if not 1 <= n <= RAW_MAX_SAMPLES:
-        raise WireError("raw_sample_count", f"sample_count {n} outside 1..{RAW_MAX_SAMPLES}")
+        raise WireError("sample_count", f"sample_count {n} outside 1..{RAW_MAX_SAMPLES}")
     if len(payload) != RAW_PREFIX_SIZE + n * RAW_SAMPLE_SIZE:
         raise WireError("raw_size", f"payload {len(payload)} B does not match sample_count {n}")
     if not raw_flags & 1:
@@ -355,7 +396,7 @@ def parse_raw(payload: bytes) -> RawPacket:
     if raw_flags & ~0x3:
         raise WireError("raw_flags", f"reserved raw_flags bits set (0x{raw_flags:04X})")
     if reserved != 0:
-        raise WireError("reserved_prefix", "reserved prefix field is not 0")
+        raise WireError("reserved", "reserved prefix field is not 0")
     samples: list[RawSample] = []
     off = RAW_PREFIX_SIZE
     for i in range(n):
