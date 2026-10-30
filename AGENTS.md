@@ -39,7 +39,7 @@ Every host change that touches the protocol MUST record the firmware commit SHA 
 
 ## Data handling
 
-- Never commit credentials, tokens, Wi-Fi passwords other than the documented public prototype default, private keys, or recorded subject data. This repository is public.
+- Never commit credentials, tokens, Wi-Fi passwords, private keys, or recorded subject data. This repository is public. Refer to network settings by configuration identifier or placeholder, or link to the firmware documentation; never write the value.
 - Recorded data files belong outside Git unless they are small synthetic fixtures created for tests.
 - Keep raw device data unchanged on disk; derived results are written as separate files with their processing parameters recorded.
 - Never present a sample as LED-ON data unless the device reported it as verified LED-ON; do not infer it on the host.
