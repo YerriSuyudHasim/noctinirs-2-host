@@ -1,0 +1,71 @@
+schema_version: 1
+record_role: product-repository
+
+project:
+  id: noctinirs-2-host
+  name: NoctiNIRS 2 Host
+  status: bootstrap
+  product_type: pc-host-application
+  development_version: "0.0.0"
+  architecture: ui-independent-core
+  language: Python
+  ui_framework: TBD  # decided by host ADR-0001
+  related_product: noctinirs-2
+
+repositories:
+  governance:
+    slug: YerriSuyudHasim/ai-engineering-hub
+    url: https://github.com/YerriSuyudHasim/ai-engineering-hub
+    project_record_url: https://github.com/YerriSuyudHasim/ai-engineering-hub/blob/main/projects/noctinirs-2-host/project.yaml
+    policy_url: https://github.com/YerriSuyudHasim/ai-engineering-hub/blob/main/AGENTS.md
+    owns:
+      - cross-project-policy
+      - workflows
+      - role-boundaries
+      - handoff-contract
+      - project-registration
+  product:
+    slug: YerriSuyudHasim/noctinirs-2-host
+    url: https://github.com/YerriSuyudHasim/noctinirs-2-host
+    project_record: project.yaml
+    policy: AGENTS.md
+    default_branch: main
+    visibility: public
+    owns:
+      - host-application-source
+      - tests
+      - packaging
+      - ui-designs
+      - host-architecture-decisions
+      - releases
+  protocol_contract:
+    slug: YerriSuyudHasim/noctinirs-2
+    url: https://github.com/YerriSuyudHasim/noctinirs-2
+    documents:
+      - docs/adr/0004-host-protocol.md
+      - docs/adr/0004-local-implementation.md
+    reference_client: tools/nn2ctl.py
+    owner_side: firmware
+
+workflow:
+  autonomy: supervised
+  lifecycle:
+    - issue
+    - branch
+    - pull-request
+    - ci
+    - independent-review
+    - human-merge-approval
+  merge_approval: human-required
+  direct_agent_merge: forbidden
+
+governance:
+  human_owner: YerriSuyudHasim
+  backup_owner: null
+  planned_developer: Claude (full-stack and UI/Figma), per hub AGENTS.md section 5.1
+  risk_class: non-clinical-research-prototype
+  evidence_retention: >-
+    github-primary; evidence records must include commit SHA, environment,
+    tool versions, commands, evidence class, and outcomes; never expose secrets
+  decision_ref: null
+  notes: backup_owner and decision_ref remain unassigned pending Owner designation
