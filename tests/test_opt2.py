@@ -86,6 +86,19 @@ def test_slot_index_mismatch_rejected():
     ("partial blank", slot(2, dets=[dict(det(), sum_off=INT32_MIN)] + [det()] * 3),
      "partial_blank"),
     ("verified with n=1", slot(2, n_on=1), "verified_with_too_few_samples"),
+    ("verified without witness", slot(2, witness=0xFF), "verified_slot_without_witness"),
+    ("verified with SAT_ON", slot(2, dets=[det(flags=0x1C | 0x01)] + [det()] * 3),
+     "verified_but_saturated"),
+    ("verified with SAT_OFF", slot(2, dets=[det()] * 3 + [det(flags=0x1C | 0x02)]),
+     "verified_but_saturated"),
+    ("verified with stab 0xFE", slot(2, dets=[det(stab=0xFE)] + [det()] * 3),
+     "verified_with_unusable_stab_q"),
+    ("verified with stab 0xFF", slot(2, dets=[det(stab=0xFF)] + [det()] * 3),
+     "verified_with_unusable_stab_q"),
+    ("verified with no PASS flags", slot(2, dets=[det(flags=0x00)] + [det()] * 3),
+     "verified_flags_not_pass"),
+    ("verified with DIFF_NEGATIVE", slot(2, dets=[det(flags=0x1C | 0x20)] + [det()] * 3),
+     "verified_flags_not_pass"),
 ])
 def test_inconsistent_slot_is_invalid_not_science(name, s, why):
     f = o.parse_opt2(build_opt2(slot_overrides={2: s}))
@@ -148,3 +161,17 @@ def test_clipped_sd_is_reported_not_exact():
     f = o.parse_opt2(build_opt2(slot_overrides={0: s}))
     sm = f.science_sample(0, 0)
     assert sm.clipped_on and sm.sd_on == 4095.875 and not sm.clipped_off
+
+
+def test_clipped_sd_adds_warning():
+    s = slot(0, dets=[det(sd_off=o.SD_CLIPPED)] + [det()] * 3)
+    f = o.parse_opt2(build_opt2(slot_overrides={0: s}))
+    assert any("clipped" in w and "slot 0" in w for w in f.warnings)
+
+
+def test_multiple_broken_fields_report_first_check_in_fixed_order():
+    # unknown quality AND missing witness AND bad mask at once: the same code every time
+    s = slot(2, quality=5, mask=0x1F, witness=7)
+    f = o.parse_opt2(build_opt2(slot_overrides={2: s}))
+    assert f.slots[2].host_invalid == "unknown_quality"
+    assert f.science_sample(2, 0) is None
