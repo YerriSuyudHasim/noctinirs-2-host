@@ -1,7 +1,7 @@
 {
   "schema": "noctinirs.optical_geometry/1",
   "geometry_map_id": 1,
-  "status": "DRAFT v0.1 - distances are Owner-measured (stated by Owner 2026-10-30); record date/instrument/tolerance before locking",
+  "status": "draft_pending_caliper",
   "provenance": "docs/OPTICAL_GEOMETRY_AND_WIRING_REFERENCE.md (PR #80) sections 3, 4, 5, 6",
   "adc": {
     "model": "ADS131M04",
@@ -334,5 +334,6 @@
     "Firmware reports detector values by AIN index only. All PD/CH naming happens on the host, once, from this file.",
     "Do not apply the AIN->PD permutation twice (see reference doc section 3).",
     "PCA outputs 10..13 are unused (no net in schematic)."
-  ]
+  ],
+  "source_draft_status": "DRAFT v0.1 - distances are Owner-measured (stated by Owner 2026-10-30); record date/instrument/tolerance before locking"
 }

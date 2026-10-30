@@ -9,14 +9,15 @@
       "sha256": "f38755c474b664ab77d28cedb977634c1eeed5f6c16ccd8c3e66fb4284b97ad7",
       "superseded_v0.3_sha256": "b2bc59aaf8ffd852fba55bf8bbc3618aab4e08fe1430ab35cba10f5985c9df9e"
     },
-    "docs/drafts/optical_geometry_v1.draft.json": {
-      "sha256": "ddc2a094273e447128d0d99ffacb3c2b48b62a89452956b257d592adb42a3c23",
-      "host_copy": "config/optical_geometry_v1.draft.json"
-    },
     "docs/adr/0004-host-protocol.md": {
       "status": "Proposed",
       "sha256": "f3db72a455df3cf0552f2401116a9f8dcf99cc7430a8539a86fee4d9513358e3",
       "note": "hash recorded at the superseded commit; not re-checked at the new commit"
+    },
+    "config/optical_geometry_v1.json": {
+      "sha256": "035c00f1c5f23b36fff34564c1bee07b8e74185964e19cadb7d139be860c39ff",
+      "host_copy": "config/optical_geometry_v1.json",
+      "status": "draft_pending_caliper (distances not locked until the Owner checks them with calipers)"
     }
   },
   "golden_vectors": {
@@ -45,5 +46,11 @@
   "firmware_commit_note": "Merge of PR #85 (contract v0.4.1). Golden vectors were added in PR #84 (d119f851). The firmware reviewer checked firmware d0fcbeb: the four golden/config files there have the same sha256 as at this commit.",
   "superseded_commit": "2ccbbffb00ea735a1cd652d271e3a1bed463a25d",
   "verified_against_golden_vectors": true,
-  "evidence_note": "Golden vectors are frozen outputs of the C codec. The host is tested against them (host/unit class); the C code itself is not run here."
+  "evidence_note": "Golden vectors are frozen outputs of the C codec. The host is tested against them (host/unit class); the C code itself is not run here.",
+  "retired": {
+    "docs/drafts/optical_geometry_v1.draft.json": {
+      "sha256": "ddc2a094273e447128d0d99ffacb3c2b48b62a89452956b257d592adb42a3c23",
+      "note": "old draft geometry, no longer used by the host"
+    }
+  }
 }

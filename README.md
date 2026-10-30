@@ -21,7 +21,7 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -e ".[dev]"
 python -m pytest -q
-python -m noctinirs_host check-geometry config\optical_geometry_v1.draft.json
+python -m noctinirs_host check-geometry config\optical_geometry_v1.json
 ```
 
-`config/optical_geometry_v1.draft.json` is a byte-identical copy of the firmware draft geometry (sha256 in the pins file). It is replaced when the official geometry file is merged in the firmware repository.
+`config/optical_geometry_v1.json` is a byte-identical copy of the official firmware file `config/optical_geometry_v1.json` (sha256 `035c00f1...39ff`, pinned in `config/reference_pins.json`). Its status is still DRAFT until the Owner has checked the distances with calipers. The older draft geometry (`ddc2a094...`) is not used anymore.

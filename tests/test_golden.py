@@ -127,10 +127,9 @@ def test_gate_vector_bit_exact(v):
     assert got == e
 
 
-def test_official_geometry_loads_and_has_same_map_as_draft():
-    off = load_geometry(Path(_DIR) / "optical_geometry_v1.json")
-    draft = load_geometry(ROOT / "config" / "optical_geometry_v1.draft.json")
-    assert off.is_draft  # status draft_pending_caliper: distances not locked
-    assert off.geometry_map_id == draft.geometry_map_id
-    assert off.detectors == draft.detectors and off.sources == draft.sources
-    assert off.channels == draft.channels
+def test_host_geometry_copy_is_byte_identical_to_firmware_file():
+    host = ROOT / "config" / "optical_geometry_v1.json"
+    assert sha256_file(host) == sha256_file(Path(_DIR) / "optical_geometry_v1.json")
+    geo = load_geometry(host)
+    assert geo.is_draft  # status draft_pending_caliper: distances not locked
+    assert geo.geometry_map_id == 1 and len(geo.channels) == 20

@@ -7,13 +7,13 @@ from noctinirs_host.geometry import GeometryError, load_geometry
 from noctinirs_host.pins import load_pins, sha256_file
 
 ROOT = Path(__file__).resolve().parents[1]
-GEO = ROOT / "config" / "optical_geometry_v1.draft.json"
+GEO = ROOT / "config" / "optical_geometry_v1.json"
 
 
 def test_loads_and_hash_matches_pin():
     geo = load_geometry(GEO)
     pins = load_pins(ROOT / "config" / "reference_pins.json")
-    pinned = pins["pinned_files"]["docs/drafts/optical_geometry_v1.draft.json"]["sha256"]
+    pinned = pins["pinned_files"]["config/optical_geometry_v1.json"]["sha256"]
     assert geo.sha256 == pinned == sha256_file(GEO)
     assert geo.is_draft
     assert len(geo.channels) == 20 and geo.geometry_map_id == 1

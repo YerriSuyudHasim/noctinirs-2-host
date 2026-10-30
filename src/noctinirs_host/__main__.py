@@ -1,7 +1,7 @@
 """Small command line helper.
 
 Windows (PowerShell), from the repository folder:
-    python -m noctinirs_host check-geometry config\\optical_geometry_v1.draft.json
+    python -m noctinirs_host check-geometry config\\optical_geometry_v1.json
 """
 
 from __future__ import annotations
