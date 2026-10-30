@@ -21,6 +21,7 @@ REJECT_REASONS = (
     "verified_n_lt_2",
     "reason_quality",
     "used_gt_available",
+    "stab_n_lt_4",
 )
 
 
