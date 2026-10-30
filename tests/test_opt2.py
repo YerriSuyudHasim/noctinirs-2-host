@@ -106,6 +106,11 @@ def test_inconsistent_slot_is_invalid_not_science(name, s, why):
                                       witness=0xFF, dets=[blank_det()] * 4), "reason_quality"),
     ("verified with n_on=1", slot(2, n_on=1), "verified_n_lt_2"),
     ("verified with n_off=0", slot(2, n_off=0), "verified_n_lt_2"),
+    ("n_on used > available", slot(2, n_on=10, avail_on=9), "used_gt_available"),
+    ("n_off used > available", slot(2, n_off=10, avail_off=0), "used_gt_available"),
+    ("blank slot, used > available", slot(2, quality=0, reason=1 << 10, mask=0, witness=0xFF,
+                                          dets=[blank_det()] * 4, n_on=5, avail_on=4),
+     "used_gt_available"),
     ("bad witness", slot(2, witness=7), "slot_inconsistent"),
     ("bad mask", slot(2, mask=0x1F), "slot_inconsistent"),
     ("value present but unverified", slot(2, mask=0b0001, dets=[det()] * 4),
@@ -173,6 +178,19 @@ def test_engineering_rule_violations_reject_packet(name, s):
         o.parse_opt2(build_opt2([s] + [eng_slot(i) for i in range(1, 20)],
                                 frame_flags=o.FF_ENGINEERING_UNGATED, gate_config_id=0))
     assert ei.value.code == "engineering_rule", name
+
+
+def test_engineering_used_gt_available_rejects_packet():
+    s = dict(eng_slot(0), n_on=5, avail_on=4)
+    with pytest.raises(WireError) as ei:
+        o.parse_opt2(build_opt2([s] + [eng_slot(i) for i in range(1, 20)],
+                                frame_flags=o.FF_ENGINEERING_UNGATED, gate_config_id=0))
+    assert ei.value.code == "used_gt_available"
+
+
+def test_used_equal_or_below_available_is_accepted():
+    s = slot(2, n_on=10, avail_on=12, n_off=10, avail_off=10)
+    assert o.parse_opt2(build_opt2(slot_overrides={2: s})).science_mask(2) == 0x0F
 
 
 @pytest.mark.parametrize("flags,gid", [(o.FF_ENGINEERING_UNGATED, 1), (0, 0)])
