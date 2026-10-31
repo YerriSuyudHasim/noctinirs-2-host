@@ -1,0 +1,6 @@
+# Keep browser source libraries despite the root Python lib/ rule.
+!**/public/lib/
+!**/public/lib/**
+
+# Dependencies are restored from each snapshot's package-lock.json.
+node_modules/
