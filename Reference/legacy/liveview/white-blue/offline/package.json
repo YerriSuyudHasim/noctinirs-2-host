@@ -1,0 +1,20 @@
+{
+  "name": "noctinirs-fnirs-liveview",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "NoctiNIRS fNIRS validation dashboard with UDP-to-WebSocket bridge",
+  "scripts": {
+    "start": "node bridge.js",
+    "start:local-device": "node bridge.js --device 127.0.0.1",
+    "simulate": "node simulator.js",
+    "check": "node --check bridge.js && node --check protocol.js && node --check simulator.js && node --check public/app.js && node --check public/lib/fnirs-geometry.js && node --check public/lib/fnirs-mbll.js && node --check public/lib/fnirs-short-separation.js && npm test",
+    "test": "node tests/fnirs-processing.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
