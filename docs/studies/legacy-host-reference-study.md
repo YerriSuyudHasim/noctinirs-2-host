@@ -2,7 +2,7 @@
 
 - Status: DRAFT for independent review. Not merged. No host source, dependency, or snapshot was changed.
 - Author: Claude (Sonnet 5.5). Independent review must come from a different model family (AGENTS.md; hub section 5.1).
-- Issue: TBD (could not be created from the authoring session; see "Process notes").
+- Issue: #9
 - Snapshots studied: PR #8, head `da7a9b1bad428e57e2d9cebf00fa2711b5511892` (`Reference/` does not exist on `main` `5eb05ff`).
 - Contract basis: optical data contract v0.4.3, firmware pin `e42f2bc9b453b223bf4557516f63fcceadfddbc8` (`docs/drafts/OPTICAL_DATA_CONTRACT_DRAFT.md`, sha256 `4dd2b89b…` equals the host pin). The legacy RAW layout is not used as a basis for any recommendation.
 - Evidence classes used: **[code]** code inspection, **[unit]** an existing or newly run unit test, **[sim]** synthetic numeric simulation with an independent comparator. None of them is hardware evidence.
@@ -175,5 +175,5 @@ All issues are follow-ups after review; each needs firmware-pin recording (AGENT
 
 ## 11. Process notes
 
-- The authoring session could not push or create issues/PRs for this repository (the GitHub App for the organization lacked access; remedy: install the Claude GitHub App at `https://github.com/apps/claude/installations/select_target` or reconnect GitHub in claude.ai connectors). The branch name should be changed to `docs/<issue-id>-legacy-host-reference-study` once the issue exists. This is a docs-only change; it must not be merged by an agent.
+- Branch/issue created after the owner linked GitHub; the first push attempts had failed with 403 (access, not content). This is a docs-only change; it must not be merged by an agent.
 - Numeric statements in sections 4 and 6 come from scratch scripts outside the repo; an independent reviewer should re-run them or confirm against their own comparator.
