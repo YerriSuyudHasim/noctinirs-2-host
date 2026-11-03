@@ -141,10 +141,13 @@ def encode_reply(req_id: int, opcode: int, status: int, *, state: int, fault: in
 
 
 def encode_frame(payload: bytes, *, simulated: bool, session_id: int, sequence: int,
-                 timestamp_us: int) -> bytes:
-    """Device->host FRAME datagram (simulator side). The payload is built elsewhere."""
-    return _envelope(MSG_FRAME, payload, FLAG_SIMULATED if simulated else 0, session_id,
-                     sequence, timestamp_us)
+                 timestamp_us: int, flags: int | None = None) -> bytes:
+    """Device->host FRAME datagram (simulator and replay side). The payload is built
+    elsewhere. `flags` (when given) replaces the flags derived from `simulated`, so a
+    replay can reproduce the original envelope flags exactly."""
+    if flags is None:
+        flags = FLAG_SIMULATED if simulated else 0
+    return _envelope(MSG_FRAME, payload, flags, session_id, sequence, timestamp_us)
 
 
 @dataclass(frozen=True)
