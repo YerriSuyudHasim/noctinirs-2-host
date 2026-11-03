@@ -162,6 +162,35 @@ def test_geometry_map_id_mismatch_shows_nothing():
     assert len(r.rx.buffers[0]) == 0
 
 
+def test_geometry_mismatch_on_a_new_session_clears_the_old_values():
+    # PR31-F1: stale science data must not survive a new, incompatible session
+    r = Rig()
+    assert r.ctl.start().ok
+    r.run(1.1)
+    assert len(r.rx.buffers[0]) == 5 and r.rx.last_seq is not None
+    assert r.ctl.stop().ok
+    r.sim.geometry_map_id = GEO.geometry_map_id + 1
+    assert r.ctl.start().ok
+    r.run(1.1)
+    assert all(len(b) == 0 for b in r.rx.buffers)
+    assert all(b.latest_tier() == GAP for b in r.rx.buffers)
+    assert r.rx.session_id == r.sim.session_id
+    # per-session counters restart (documented policy); the mismatches of THIS session are counted
+    assert r.rx.counters["frames"] == 0 and r.rx.counters["geometry_mismatch"] == 5
+
+
+def test_rejected_first_frame_of_a_new_session_also_clears_the_old_values():
+    r = Rig()
+    assert r.ctl.start().ok
+    r.run(1.1)
+    assert len(r.rx.buffers[0]) == 5
+    bad = encode_frame(b"\x01" * 10, simulated=True, session_id=r.sim.session_id + 7,
+                       sequence=1, timestamp_us=0)
+    assert r.rx.feed(bad) == "rejected"
+    assert all(len(b) == 0 for b in r.rx.buffers)
+    assert r.rx.summary()["reject_total"] >= 1  # reject counters stay cumulative
+
+
 def test_garbage_and_non_frames_do_not_crash():
     rx = FrameReceiver(GEO)
     assert rx.feed(b"\x00" * 40) == "rejected"
