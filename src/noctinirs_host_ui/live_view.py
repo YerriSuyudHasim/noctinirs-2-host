@@ -82,9 +82,11 @@ class LiveView(QtWidgets.QWidget):
         # --- Detail: channel picker + stacked plots ---
         self.channel_list = QtWidgets.QListWidget()
         self.channel_list.setObjectName("live_channel_list")
-        self.channel_list.setMaximumWidth(170)
+        self.channel_list.setMinimumWidth(190)
+        self.channel_list.setMaximumWidth(210)
+        self.channel_list.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         for ch in receiver.channels:
-            it = QtWidgets.QListWidgetItem(f"{ch.name}  ({ch.kind}, {ch.sd_mm:g} mm)")
+            it = QtWidgets.QListWidgetItem(f"{ch.name}  {ch.kind} {ch.sd_mm:g} mm")
             it.setFlags(it.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
             it.setCheckState(QtCore.Qt.CheckState.Checked if ch.index < DEFAULT_DETAIL
                              else QtCore.Qt.CheckState.Unchecked)

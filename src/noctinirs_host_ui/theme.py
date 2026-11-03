@@ -143,6 +143,19 @@ QSpinBox::down-button {{ subcontrol-position: bottom right; }}
 {arrows}
 QSpinBox:disabled, QComboBox:disabled {{ color: {t.muted}; background: {t.bg}; }}
 QSpinBox:focus, QComboBox:focus {{ border-color: {t.accent}; }}
+QTabWidget::pane {{ border: none; background: transparent; }}
+QTabBar {{ background: transparent; }}
+QTabBar::tab {{ background: transparent; color: {t.muted}; padding: 7px 16px; margin-right: 4px;
+               border: none; border-bottom: 2px solid transparent; font-weight: 500; }}
+QTabBar::tab:selected {{ color: {t.text}; border-bottom: 2px solid {t.accent}; }}
+QTabBar::tab:hover:!selected {{ color: {t.text}; }}
+QListWidget {{ background: {t.surface}; border: 1px solid {t.border}; border-radius: {RADIUS_CONTROL}px;
+              padding: 4px; outline: none; }}
+QListWidget::item {{ padding: 3px 4px; color: {t.text}; }}
+QListWidget::indicator {{ width: 14px; height: 14px; border: 1px solid {t.muted}; border-radius: 4px;
+                         background: {t.surface}; }}
+QListWidget::indicator:checked {{ background: {t.accent}; border-color: {t.accent}; }}
+QListWidget::item:selected {{ background: {t.chip_bg}; color: {t.text}; }}
 QComboBox QAbstractItemView {{ background: {t.surface}; selection-background-color: {t.chip_bg};
                               selection-color: {t.text}; border: 1px solid {t.border}; }}
 
