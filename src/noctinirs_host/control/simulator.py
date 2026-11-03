@@ -14,6 +14,7 @@ import time
 from collections import OrderedDict
 from typing import Callable
 
+from ..wire.envelope import PROTOCOL_VERSION
 from ..wire.errors import WireError
 from .protocol import (
     FIRMWARE_PIN, LED_CHANNELS, LED_MAX_MA, MUTATING_OPS, OP_CLEAR_FAULT, OP_GET_CONFIG,
@@ -60,9 +61,12 @@ class DeviceSimulator:
         if self.state != ST_STREAMING:
             return
         now = self._clock()
-        if self._grace_started_at is None and now - self._owner_active_at >= SILENCE_S:
-            self._grace_started_at = now
-        if self._grace_started_at is not None and now - self._grace_started_at >= GRACE_S:
+        # Deadlines are absolute (local implementation record, refinement 4): grace
+        # starts at the silence deadline, however late this poll runs.
+        silence_deadline = self._owner_active_at + SILENCE_S
+        if self._grace_started_at is None and now >= silence_deadline:
+            self._grace_started_at = silence_deadline
+        if self._grace_started_at is not None and now >= self._grace_started_at + GRACE_S:
             self.counters["grace_expirations"] += 1
             self._end_stream("LINK_LOSS")
 
@@ -86,6 +90,10 @@ class DeviceSimulator:
             self.counters["malformed"] += 1
             return []
         self.counters["requests"] += 1
+        # MODEL CHOICE: BAD_FRAME (protocol mismatch) is checked before RESERVED_FLAGS;
+        # the documents do not order the two.
+        if req.protocol_version != PROTOCOL_VERSION:
+            return [self._reply(req.req_id, req.opcode, STATUS_BAD_FRAME)]
         if req.flags & 0xFFFE:  # host bit0 ignored; bit1 and bits 2..15 rejected
             self.counters["reserved_flags_rejects"] += 1
             return [self._reply(req.req_id, req.opcode, STATUS_RESERVED_FLAGS)]
@@ -120,6 +128,11 @@ class DeviceSimulator:
 
     def _execute(self, req, op: int, args: bytes) -> tuple[bytes, bool]:
         rid = req.req_id
+        # Zero-argument commands take no argument bytes (local implementation record table).
+        # MODEL CHOICE: trailing bytes -> INVALID_ARG, except safe_off, which is never
+        # refused (it ignores extra bytes so that turning everything off cannot fail on framing).
+        if op in (OP_INFO, OP_GET_CONFIG, OP_START, OP_STOP, OP_CLEAR_FAULT) and args:
+            return self._reply(rid, op, STATUS_INVALID_ARG), op in MUTATING_OPS
         if op == OP_SAFE_OFF:  # accepted in every state, never cached
             was = self.state
             self.state, self.session_id, self._grace_started_at = ST_SAFE_OFF, 0, None

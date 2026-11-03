@@ -103,6 +103,7 @@ def args_host_time(t_host_us: int) -> bytes:
 class RawRequest:
     """A host->device datagram after framing/CRC/length checks (simulator side)."""
     flags: int
+    protocol_version: int
     session_id: int
     sequence: int
     req_id: int
@@ -111,8 +112,9 @@ class RawRequest:
 
 
 def decode_request(datagram: bytes) -> RawRequest:
-    """Check magic, sizes, CRC and REQUEST framing. Reserved flags are NOT checked
-    here: the device answers RESERVED_FLAGS, so the caller decides."""
+    """Check magic, sizes, CRC and REQUEST framing. Reserved flags and protocol_version
+    are NOT checked here: a CRC-valid, parsable request with either problem gets a
+    reply (RESERVED_FLAGS / BAD_FRAME), so the caller decides."""
     n = len(datagram)
     if n < HEADER_SIZE + 4 or n > HEADER_SIZE + MAX_PAYLOAD + 4:
         raise WireError("size", f"datagram size {n}")
@@ -124,10 +126,8 @@ def decode_request(datagram: bytes) -> RawRequest:
     end = HEADER_SIZE + length
     if zlib.crc32(datagram[:end]) & 0xFFFFFFFF != struct.unpack_from("<I", datagram, end)[0]:
         raise WireError("crc", "CRC-32 mismatch")
-    if proto != PROTOCOL_VERSION:
-        raise WireError("protocol_version", f"protocol_version {proto}")
     req_id, opcode = struct.unpack_from("<IH", datagram, HEADER_SIZE)
-    return RawRequest(flags, session, seq, req_id, opcode, bytes(datagram[HEADER_SIZE + 6:end]))
+    return RawRequest(flags, proto, session, seq, req_id, opcode, bytes(datagram[HEADER_SIZE + 6:end]))
 
 
 def encode_reply(req_id: int, opcode: int, status: int, *, state: int, fault: int, simulated: bool,

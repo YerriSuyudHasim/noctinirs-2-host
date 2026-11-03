@@ -92,9 +92,12 @@ def test_each_command_roundtrips_against_simulator():
     assert ctl.set_fs(8).ok and ctl.settings.fs_hz == 8 and sim.fs_hz == 8
     assert ctl.set_led_current(3, 12).ok and sim.current_ma[3] == 12
     assert ctl.start().ok and ctl.state_text == "STREAMING" and ctl.session_id == 1
+    sent = ctl.counters["sent"]
     clk.t += 0.6
     ctl.tick()
-    assert ctl.events[-1].text.startswith("heartbeat: OK")
+    assert ctl.counters["sent"] == sent + 1  # heartbeat went out (and stays out of the log)
+    assert not any(e.text.startswith("heartbeat") for e in ctl.events)
+    assert ctl.get_time().ok
     assert ctl.stop().ok and ctl.state_text == "STOPPED" and ctl.session_id == 0
     assert ctl.safe_off().ok and ctl.state_text == "SAFE_OFF"
     assert ctl.clear_fault().ok and ctl.state_text == "STOPPED"
@@ -292,3 +295,98 @@ def test_listener_receives_events():
     ctl.listeners.append(seen.append)
     ctl.connect()
     assert seen and seen[-1].kind == "link"
+
+
+# --- review round 1 (PR #25 at cb94b7f) ---------------------------------------------
+def test_late_first_poll_does_not_extend_grace():
+    """Grace is measured from the silence deadline, not from when a poll notices it."""
+    clk, sim, tr, ctl = connected()
+    ctl.start()
+    clk.t += 5.0  # 5 s of silence: past silence (1.5 s) + grace (3 s) = 4.5 s
+    sim.poll()
+    assert sim.state == P.ST_STOPPED and sim.last_end_reason == "LINK_LOSS"
+    ctl.tick()  # a heartbeat now must not revive the stream
+    assert ctl.state_text == "STOPPED" and ctl.last_end.startswith("LINK_LOSS")
+
+
+def test_heartbeat_arriving_after_deadline_is_refused_without_prior_poll():
+    clk, sim, tr, ctl = connected()
+    ctl.start()
+    clk.t += 5.0  # no poll in between: handle() must apply the deadline itself
+    res = P.decode_reply(sim.handle(P.encode_request(77, P.OP_HEARTBEAT, struct.pack("<Q", 1),
+                                                     session_id=1))[0])
+    assert res.status_text == "INVALID_STATE" and sim.state == P.ST_STOPPED
+
+
+def test_grace_started_exactly_at_silence_deadline_even_if_polled_late():
+    clk, sim, tr, ctl = connected()
+    ctl.start()
+    clk.t += SILENCE_S + 1.0  # inside grace window (1.5 s .. 4.5 s)
+    sim.poll()
+    assert sim.grace_active and sim.state == P.ST_STREAMING
+    clk.t += GRACE_S - 1.0 + 0.01  # now 4.51 s after the last owner request
+    sim.poll()
+    assert sim.state == P.ST_STOPPED
+
+
+@pytest.mark.parametrize("op", [P.OP_INFO, P.OP_GET_CONFIG, P.OP_START, P.OP_STOP, P.OP_CLEAR_FAULT])
+def test_trailing_bytes_on_zero_argument_commands_are_invalid_arg(op):
+    clk, sim, tr, ctl = connected()
+    r = P.decode_reply(sim.handle(P.encode_request(300 + op, op, b"\x00", session_id=0))[0])
+    assert r.status_text == "INVALID_ARG" and sim.state == P.ST_STOPPED
+
+
+def test_safe_off_ignores_trailing_bytes_model_choice():
+    clk, sim, tr, ctl = connected()
+    r = P.decode_reply(sim.handle(P.encode_request(400, P.OP_SAFE_OFF, b"\x00\x01"))[0])
+    assert r.ok and sim.state == P.ST_SAFE_OFF
+
+
+def test_protocol_version_mismatch_gets_bad_frame_reply():
+    clk, sim, tr, ctl = connected()
+    import zlib
+    raw = bytearray(P.encode_request(500, P.OP_INFO))
+    struct.pack_into("<H", raw, 6, 2)  # protocol_version = 2
+    raw[-4:] = struct.pack("<I", zlib.crc32(bytes(raw[:-4])))
+    reply = sim.handle(bytes(raw))
+    assert len(reply) == 1 and P.decode_reply(reply[0]).status_text == "BAD_FRAME"
+    assert sim.state == P.ST_STOPPED
+
+
+@pytest.mark.parametrize("call", [lambda c: c.stop(), lambda c: c.clear_fault()])
+def test_wrong_state_stop_and_clear_fault_send_no_packet(call):
+    _, _, _, ctl = connected()
+    sent = ctl.counters["sent"]
+    res = call(ctl)
+    assert res.status == "LOCAL_REJECT" and not res.sent and ctl.counters["sent"] == sent
+
+
+def test_stop_is_still_sent_after_a_lost_stop_reply():
+    _, sim, tr, ctl = connected(retries=0)
+    ctl.start()
+    tr.drop_next_replies = 1
+    assert ctl.stop().status == "TIMEOUT"
+    assert ctl.state_text == "STREAMING"  # host never assumes success
+    res = ctl.stop()  # the first STOP did execute; a new request id gets INVALID_STATE ...
+    assert res.status == "INVALID_STATE" and res.sent
+    assert ctl.state_text == "STOPPED" and ctl.session_id == 0  # ... and the state converges
+
+
+def test_stale_state_is_refreshed_while_not_streaming():
+    clk, sim, tr, ctl = connected()
+    sim.state = P.ST_SAFE_OFF  # e.g. changed through the USB console
+    clk.t += 2.1
+    ctl.tick()
+    assert ctl.state_text == "SAFE_OFF"
+    assert not any(e.text.startswith("status") for e in ctl.events)  # quiet when OK
+
+
+def test_unrelated_stale_and_wrong_opcode_replies_do_not_break_a_transaction():
+    _, sim, tr, ctl = connected()
+    stale = P.encode_reply(999999, P.OP_STATUS, 0, state=1, fault=0, simulated=True,
+                           boot_id=sim.boot_id, t_rx_us=0, extension=b"\x00" * 45)
+    wrong_op = P.encode_reply(ctl._next_id, P.OP_INFO, 0, state=1, fault=0, simulated=True,
+                              boot_id=sim.boot_id, t_rx_us=0, extension=b"x=1")
+    tr._queue[:0] = [stale, wrong_op]
+    assert ctl.set_fs(7).ok
+    assert ctl.counters["unmatched"] >= 2 and sim.fs_hz == 7
