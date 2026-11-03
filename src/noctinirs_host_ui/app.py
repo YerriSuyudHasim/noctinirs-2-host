@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
-from collections import deque
+import time
 from pathlib import Path
 
 # Import PySide6 before pyqtgraph so that pyqtgraph binds to PySide6.
@@ -15,13 +15,24 @@ import PySide6
 from noctinirs_host import __version__ as CORE_VERSION
 from noctinirs_host.control.session import LoopbackTransport, SessionController
 from noctinirs_host.control.simulator import DeviceSimulator
+from noctinirs_host.geometry import load_geometry
+from noctinirs_host.live.receiver import FrameReceiver
 
 from .control_panel import ControlPanel
 from .credits import APP_NAME, BANNER_TEXT, SYNTHETIC_NOTICE, about_text
 from .theme import THEMES, build_qss
-from .synthetic import SAMPLE_RATE_HZ, WINDOW_SECONDS, SyntheticSource
+from .live_view import LiveView
 
-_MAX_POINTS = int(SAMPLE_RATE_HZ * WINDOW_SECONDS)
+GEOMETRY_NAME = "optical_geometry_v1.json"
+LIVE_REFRESH_MS = 100
+
+
+def geometry_path() -> Path:
+    """The geometry file: next to the bundle when frozen, else the repo's config folder."""
+    base = getattr(sys, "_MEIPASS", None)
+    if base is not None:
+        return Path(base) / "config" / GEOMETRY_NAME
+    return Path(__file__).resolve().parents[2] / "config" / GEOMETRY_NAME
 
 
 def _arrow_images(theme) -> tuple[str | None, str | None]:
@@ -55,15 +66,17 @@ def _arrow_images(theme) -> tuple[str | None, str | None]:
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle(f"{APP_NAME} (S1: simulated device)")
+        self.setWindowTitle(f"{APP_NAME} (S2: simulated device)")
         self.resize(1240, 880)
+        # A closed window is destroyed: the application style sheet re-styles every live widget.
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, True)
 
-        self._simulator = DeviceSimulator()
+        self.geometry = load_geometry(geometry_path())
+        self._simulator = DeviceSimulator(geometry=self.geometry)
         self.controller = SessionController(LoopbackTransport(self._simulator))
+        self.receiver = FrameReceiver(self.geometry)
+        self.controller.frame_sink = self.receiver.feed
         self.panel = ControlPanel(self.controller)
-        self._source = SyntheticSource()
-        self._t: deque[float] = deque(maxlen=_MAX_POINTS)
-        self._y: deque[float] = deque(maxlen=_MAX_POINTS)
 
         # --- header: app name + the labels that must always be visible ---
         title = QtWidgets.QLabel(APP_NAME)
@@ -89,14 +102,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.dark_btn.toggled.connect(lambda on: self.set_theme("dark" if on else "light"))
         hl.addWidget(self.dark_btn)
 
-        self.plot = pg.PlotWidget()
-        self.plot.setLabel("bottom", "Time", units="s")
-        self.plot.setLabel("left", "Intensity (arbitrary units, synthetic)")
-        self.plot.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
-        self.plot.showGrid(x=False, y=True, alpha=0.18)
-        self.plot.getPlotItem().hideButtons()
-        self.curve = self.plot.plot([], [], pen=pg.mkPen(width=2))
-
         central = QtWidgets.QWidget()
         central.setObjectName("root")
         outer = QtWidgets.QVBoxLayout(central)
@@ -114,10 +119,9 @@ class MainWindow(QtWidgets.QMainWindow):
         pl = QtWidgets.QVBoxLayout(plot_card)
         pl.setContentsMargins(16, 14, 16, 12)
         pl.setSpacing(8)
-        self.plot_note = QtWidgets.QLabel("Demo signal only - the simulated device sends no measurement data yet.")
-        self.plot_note.setObjectName("plot_note")
-        pl.addWidget(self.plot_note)
-        pl.addWidget(self.plot, stretch=1)
+        self.live = LiveView(self.receiver, THEMES["light"])
+        self.plot_note = self.live.plot_note
+        pl.addWidget(self.live, stretch=1)
         body.addWidget(plot_card, stretch=1)
         outer.addLayout(body, stretch=1)
         self.setCentralWidget(central)
@@ -140,7 +144,7 @@ class MainWindow(QtWidgets.QMainWindow):
         about_action.triggered.connect(self.show_about)
 
         self._timer = QtCore.QTimer(self)
-        self._timer.setInterval(int(1000 / SAMPLE_RATE_HZ))
+        self._timer.setInterval(LIVE_REFRESH_MS)
         self._timer.timeout.connect(self._on_timer)
         self._timer.start()
         self._ui_timer = QtCore.QTimer(self)
@@ -162,25 +166,16 @@ class MainWindow(QtWidgets.QMainWindow):
         if app is not None:
             up, down = _arrow_images(theme)
             app.setStyleSheet(build_qss(theme, up, down))
-        self.plot.setBackground(theme.plot_bg)
-        axis_pen = pg.mkPen(theme.plot_axis)
-        for side in ("left", "bottom"):
-            ax = self.plot.getAxis(side)
-            ax.setPen(axis_pen)
-            ax.setTextPen(axis_pen)
-        self.plot.getPlotItem().getViewBox().setBorder(None)
-        self.curve.setPen(pg.mkPen(theme.accent, width=2))
+        self.live.apply_theme(theme)
 
     def _on_timer(self) -> None:
-        if self.panel.is_streaming():  # demo curve moves only while the device streams
-            self.tick()
+        self.tick()
 
     def tick(self) -> None:
-        """Append one synthetic sample and redraw."""
-        t, y = self._source.next_sample()
-        self._t.append(t)
-        self._y.append(y)
-        self.curve.setData(list(self._t), list(self._y))
+        """Hand pending frames to the receiver, then redraw."""
+        if self.controller.connected:
+            self.controller.pump()
+        self.live.refresh()
 
     @staticmethod
     def about_message() -> str:
@@ -191,10 +186,21 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
 def run_self_test(window: MainWindow, out_path: str | None) -> int:
-    """Draw a few samples, then report. Used to smoke-test a built bundle."""
-    for _ in range(5):
-        window.tick()
-    ok = len(window._t) == 5 and bool(window.about_message())
+    """Start the simulated stream, wait for a few frames, then report. Smoke test for a bundle."""
+    ok = False
+    if window.controller.connect().ok and window.controller.set_fs(10).ok \
+            and window.controller.start().ok:
+        app = QtWidgets.QApplication.instance()
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and window.receiver.counters["frames"] < 5:
+            window.controller.tick()
+            window.tick()
+            if app is not None:
+                app.processEvents()
+            time.sleep(0.05)
+        window.controller.stop()
+        ok = window.receiver.counters["frames"] >= 5 and window.receiver.counters["rejected"] == 0 \
+            and len(window.receiver.channels) > 0 and bool(window.about_message())
     message = f"SELFTEST {'OK' if ok else 'FAIL'} core={CORE_VERSION} qt={QtCore.qVersion()}"
     if out_path:
         with open(out_path, "w", encoding="utf-8") as fh:

@@ -34,6 +34,9 @@ class Theme:
     plot_grid: str
     plot_axis: str
     chip_bg: str
+    wl_a: str  # 735 nm line
+    wl_b: str  # 850 nm line
+    tier_marginal: str  # text colour for the 'marginal' quality tier on the plot background
 
 
 LIGHT = Theme(
@@ -41,12 +44,14 @@ LIGHT = Theme(
     muted="#59616F", accent="#1D4ED8", on_accent="#FFFFFF", danger="#C62828",
     on_danger="#FFFFFF", ok="#17703F", warn_bg="#FFF3CF", on_warn="#5F4300",
     plot_bg="#FFFFFF", plot_grid="#E6E9EE", plot_axis="#59616F", chip_bg="#EEF0F3",
+    wl_a="#B83A0B", wl_b="#1D4ED8", tier_marginal="#8A5A00",
 )
 DARK = Theme(
     name="dark", bg="#101318", surface="#181C23", border="#2A313C", text="#E7EAF0",
     muted="#A2ABB9", accent="#7FA8FF", on_accent="#0A1020", danger="#D23A3F",
     on_danger="#FFFFFF", ok="#5CD08A", warn_bg="#3A2F10", on_warn="#F6D77A",
     plot_bg="#181C23", plot_grid="#2A313C", plot_axis="#A2ABB9", chip_bg="#232934",
+    wl_a="#FF9A62", wl_b="#7FA8FF", tier_marginal="#F6D77A",
 )
 THEMES = {"light": LIGHT, "dark": DARK}
 
@@ -79,6 +84,8 @@ def contrast_pairs(t: Theme) -> list[tuple[str, str, str]]:
         ("ok text on surface", t.ok, t.surface), ("warn text", t.on_warn, t.warn_bg),
         ("muted on pressed/selected", t.muted, t.chip_bg), ("text on pressed/selected", t.text, t.chip_bg),
         ("plot axis on plot", t.plot_axis, t.plot_bg),
+        ("735 nm line on plot", t.wl_a, t.plot_bg), ("850 nm line on plot", t.wl_b, t.plot_bg),
+        ("marginal tier on plot", t.tier_marginal, t.plot_bg), ("good tier on plot", t.ok, t.plot_bg),
     ]
 
 
@@ -136,6 +143,19 @@ QSpinBox::down-button {{ subcontrol-position: bottom right; }}
 {arrows}
 QSpinBox:disabled, QComboBox:disabled {{ color: {t.muted}; background: {t.bg}; }}
 QSpinBox:focus, QComboBox:focus {{ border-color: {t.accent}; }}
+QTabWidget::pane {{ border: none; background: transparent; }}
+QTabBar {{ background: transparent; }}
+QTabBar::tab {{ background: transparent; color: {t.muted}; padding: 7px 16px; margin-right: 4px;
+               border: none; border-bottom: 2px solid transparent; font-weight: 500; }}
+QTabBar::tab:selected {{ color: {t.text}; border-bottom: 2px solid {t.accent}; }}
+QTabBar::tab:hover:!selected {{ color: {t.text}; }}
+QListWidget {{ background: {t.surface}; border: 1px solid {t.border}; border-radius: {RADIUS_CONTROL}px;
+              padding: 4px; outline: none; }}
+QListWidget::item {{ padding: 3px 4px; color: {t.text}; }}
+QListWidget::indicator {{ width: 14px; height: 14px; border: 1px solid {t.muted}; border-radius: 4px;
+                         background: {t.surface}; }}
+QListWidget::indicator:checked {{ background: {t.accent}; border-color: {t.accent}; }}
+QListWidget::item:selected {{ background: {t.chip_bg}; color: {t.text}; }}
 QComboBox QAbstractItemView {{ background: {t.surface}; selection-background-color: {t.chip_bg};
                               selection-color: {t.text}; border: 1px solid {t.border}; }}
 

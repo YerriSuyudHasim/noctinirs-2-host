@@ -132,14 +132,12 @@ def test_every_log_line_is_marked_simulated(win):
     assert len(lines) >= 4 and all("[SIM]" in l for l in lines)  # every line, from the first
 
 
-def test_demo_plot_moves_only_while_streaming(win):
+def test_no_frames_until_streaming(win):
     btn(win, "connect_button").click()
-    win._on_timer()
-    assert len(win._t) == 0
+    win.tick()
+    assert win.receiver.counters["frames"] == 0
     btn(win, "start_button").click()
-    win._on_timer()
-    win._on_timer()
-    assert len(win._t) == 2
+    assert win.controller.device_state is not None
 
 
 def test_real_device_is_not_offered(win):
@@ -190,12 +188,12 @@ def test_theme_switch_changes_style_plot_and_keeps_behaviour(win):
     assert win.theme_name == "light" and LIGHT.surface in app.styleSheet()
     win.set_theme("dark")
     assert win.theme_name == "dark" and DARK.surface in app.styleSheet()
-    assert win.plot.backgroundBrush().color().name().lower() == DARK.plot_bg.lower()
+    assert win.live.overview.backgroundBrush().color().name().lower() == DARK.plot_bg.lower()
     btn(win, "connect_button").click()
     btn(win, "start_button").click()
     assert "STREAMING" in win.panel.state_label.text()
     win.set_theme("light")  # leave the shared application in the default theme
-    assert win.plot.backgroundBrush().color().name().lower() == LIGHT.plot_bg.lower()
+    assert win.live.overview.backgroundBrush().color().name().lower() == LIGHT.plot_bg.lower()
 
 
 def test_view_menu_offers_both_themes(win):

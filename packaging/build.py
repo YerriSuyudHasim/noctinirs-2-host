@@ -18,6 +18,7 @@ PyInstaller itself.
 
 from __future__ import annotations
 
+import os
 import pathlib
 import platform
 import re
@@ -80,6 +81,8 @@ def run_pyinstaller() -> None:
         "--workpath", str(ROOT / "build" / "pyinstaller"),
         "--specpath", str(ROOT / "build"),
         "--paths", str(ROOT / "src"),
+        # the optical geometry file ships byte-identical (pinned by sha256 in the tests)
+        "--add-data", f"{ROOT / 'config' / 'optical_geometry_v1.json'}{os.pathsep}config",
         str(ROOT / "packaging" / "entry_ui.py"),
     ]
     print("RUN:", " ".join(cmd), flush=True)

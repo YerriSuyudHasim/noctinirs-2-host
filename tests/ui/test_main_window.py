@@ -29,14 +29,13 @@ def test_window_shows_banner_and_synthetic_notice(qapp) -> None:
     w.close()
 
 
-def test_plot_receives_samples_and_axes_are_labelled(qapp) -> None:
+def test_live_view_is_wired_to_the_simulated_stream(qapp) -> None:
     w = MainWindow()
-    for _ in range(12):
-        w.tick()
-    x, y = w.curve.getData()
-    assert len(x) == 12 and len(y) == 12
-    assert "Time" in w.plot.getAxis("bottom").labelText
-    assert "synthetic" in w.plot.getAxis("left").labelText
+    w._timer.stop()
+    w._ui_timer.stop()
+    assert w.controller.connect().ok and w.controller.start().ok
+    assert w.live.receiver is w.receiver and w.controller.frame_sink == w.receiver.feed
+    assert "SIMULATED" in w.plot_note.text()
     w.close()
 
 
