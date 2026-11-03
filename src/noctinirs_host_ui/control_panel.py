@@ -15,15 +15,77 @@ from noctinirs_host.control.protocol import (
 )
 from noctinirs_host.control.session import Event, SessionController
 
+from .theme import SPACE
+
 SIM_BANNER = "SIMULATED DEVICE - no real device is connected"
 REAL_DEVICE_NOTE = "Real device connection is not available in this version."
 
-_STATE_STYLE = {
-    "STOPPED": "color: #1b5e20;",
-    "STREAMING": "color: #0d47a1; font-weight: bold;",
-    "SAFE_OFF": "color: #b71c1c; font-weight: bold;",
-    "FAULTED": "color: #b71c1c; font-weight: bold;",
-}
+_STATE_TONE = {"STOPPED": "ok", "STREAMING": "info", "SAFE_OFF": "danger", "FAULTED": "danger"}
+
+
+def _button(text: str, name: str, role: str | None = None) -> QtWidgets.QPushButton:
+    b = QtWidgets.QPushButton(text)
+    b.setObjectName(name)
+    b.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+    if role:
+        b.setProperty("role", role)
+    return b
+
+
+def _muted(text: str) -> QtWidgets.QLabel:
+    lab = QtWidgets.QLabel(text)
+    lab.setObjectName("muted")
+    lab.setWordWrap(True)
+    return lab
+
+
+def _card(title: str) -> tuple[QtWidgets.QFrame, QtWidgets.QVBoxLayout]:
+    frame = QtWidgets.QFrame()
+    frame.setObjectName("card")
+    lay = QtWidgets.QVBoxLayout(frame)
+    lay.setContentsMargins(SPACE + 4, SPACE, SPACE + 4, SPACE + 2)
+    lay.setSpacing(10)
+    head = QtWidgets.QLabel(title.upper())
+    head.setObjectName("sectionTitle")
+    lay.addWidget(head)
+    return frame, lay
+
+
+class _Collapsible(QtWidgets.QWidget):
+    """A quiet section header that shows or hides its body."""
+
+    def __init__(self, title: str, *, expanded: bool, summary: QtWidgets.QLabel | None = None) -> None:
+        super().__init__()
+        self.toggle = QtWidgets.QToolButton()
+        self.toggle.setObjectName("sectionToggle")
+        self.toggle.setCheckable(True)
+        self.toggle.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.toggle.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self._title = title
+        self.body_widget = QtWidgets.QWidget()
+        self.body = QtWidgets.QVBoxLayout(self.body_widget)
+        self.body.setContentsMargins(0, 4, 0, 0)
+        self.body.setSpacing(8)
+        head = QtWidgets.QHBoxLayout()
+        head.setContentsMargins(0, 0, 0, 0)
+        head.addWidget(self.toggle)
+        if summary is not None:
+            summary.setWordWrap(False)
+            head.addWidget(summary, 1)
+        else:
+            head.addStretch(1)
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        lay.addLayout(head)
+        lay.addWidget(self.body_widget)
+        self.toggle.toggled.connect(self.set_expanded)
+        self.toggle.setChecked(expanded)
+        self.set_expanded(expanded)
+
+    def set_expanded(self, on: bool) -> None:
+        self.toggle.setText(("\u25BE " if on else "\u25B8 ") + self._title)
+        self.body_widget.setVisible(on)
 
 
 class ControlPanel(QtWidgets.QWidget):
@@ -38,62 +100,57 @@ class ControlPanel(QtWidgets.QWidget):
         self.device_combo = QtWidgets.QComboBox()
         self.device_combo.setObjectName("device_combo")
         self.device_combo.addItem("Simulated device (built-in)")
-        self.connect_btn = QtWidgets.QPushButton("Connect")
-        self.connect_btn.setObjectName("connect_button")
-        self.disconnect_btn = QtWidgets.QPushButton("Disconnect")
-        self.disconnect_btn.setObjectName("disconnect_button")
-        note = QtWidgets.QLabel(REAL_DEVICE_NOTE)
-        note.setWordWrap(True)
-        note.setStyleSheet("color: #555;")
-        conn = QtWidgets.QGroupBox("Connection")
-        cl = QtWidgets.QGridLayout(conn)
-        cl.addWidget(self.device_combo, 0, 0, 1, 2)
-        cl.addWidget(self.connect_btn, 1, 0)
-        cl.addWidget(self.disconnect_btn, 1, 1)
-        cl.addWidget(note, 2, 0, 1, 2)
+        self.connect_btn = _button("Connect", "connect_button", "primary")
+        self.disconnect_btn = _button("Disconnect", "disconnect_button")
+        note = _muted(REAL_DEVICE_NOTE)
+        conn, cl = _card("Connection")
+        cl.addWidget(self.device_combo)
+        row = QtWidgets.QHBoxLayout()
+        row.setSpacing(8)
+        row.addWidget(self.connect_btn, 1)
+        row.addWidget(self.disconnect_btn, 1)
+        cl.addLayout(row)
+        cl.addWidget(note)
 
         # --- status ---
         self.state_label = QtWidgets.QLabel("NOT CONNECTED")
-        self.state_label.setObjectName("state_label")
-        self.detail_label = QtWidgets.QLabel("")
+        self.state_label.setObjectName("stateText")
+        self.detail_label = _muted("")
         self.detail_label.setObjectName("detail_label")
-        self.detail_label.setWordWrap(True)
-        status = QtWidgets.QGroupBox("Device status")
-        sl = QtWidgets.QVBoxLayout(status)
+        status, sl = _card("Device status")
         sl.addWidget(self.state_label)
         sl.addWidget(self.detail_label)
 
         # --- run control ---
-        self.start_btn = QtWidgets.QPushButton("Start")
-        self.start_btn.setObjectName("start_button")
-        self.stop_btn = QtWidgets.QPushButton("Stop")
-        self.stop_btn.setObjectName("stop_button")
-        self.clear_btn = QtWidgets.QPushButton("Clear fault")
-        self.clear_btn.setObjectName("clear_fault_button")
-        self.safe_btn = QtWidgets.QPushButton("SAFE OFF")
-        self.safe_btn.setObjectName("safe_off_button")
-        self.safe_btn.setMinimumHeight(44)
-        self.safe_btn.setStyleSheet(
-            "QPushButton { background-color: #c62828; color: white; font-weight: bold; }"
-            "QPushButton:disabled { background-color: #d9a5a5; color: #fff; }")
-        run = QtWidgets.QGroupBox("Run")
-        rl = QtWidgets.QGridLayout(run)
-        rl.addWidget(self.start_btn, 0, 0)
-        rl.addWidget(self.stop_btn, 0, 1)
-        rl.addWidget(self.clear_btn, 1, 0, 1, 2)
-        rl.addWidget(self.safe_btn, 2, 0, 1, 2)
+        self.start_btn = _button("Start", "start_button", "primary")
+        self.stop_btn = _button("Stop", "stop_button")
+        self.clear_btn = _button("Clear fault", "clear_fault_button")
+        self.safe_btn = _button("SAFE OFF", "safe_off_button", "danger")
+        self.safe_btn.setMinimumHeight(46)
+        run, rl = _card("Run")
+        row = QtWidgets.QHBoxLayout()
+        row.setSpacing(8)
+        row.addWidget(self.start_btn, 1)
+        row.addWidget(self.stop_btn, 1)
+        rl.addLayout(row)
+        rl.addWidget(self.clear_btn)
+        rl.addSpacing(4)
+        rl.addWidget(self.safe_btn)
 
         # --- settings ---
         self.fs_spin = QtWidgets.QSpinBox()
         self.fs_spin.setObjectName("fs_spin")
         self.fs_spin.setSuffix(" Hz")
-        self.fs_apply = QtWidgets.QPushButton("Apply Fs")
-        self.fs_apply.setObjectName("fs_apply_button")
+        self.fs_apply = _button("Apply Fs", "fs_apply_button")
         self.led_table = QtWidgets.QTableWidget(LED_CHANNELS, 2)
         self.led_table.setObjectName("led_table")
         self.led_table.setHorizontalHeaderLabels(["LED channel", "Current (mA)"])
         self.led_table.verticalHeader().setVisible(False)
         self.led_table.horizontalHeader().setStretchLastSection(True)
+        self.led_table.setShowGrid(False)
+        self.led_table.setAlternatingRowColors(True)
+        self.led_table.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self.led_table.verticalHeader().setDefaultSectionSize(36)
         self._led_spins: list[QtWidgets.QSpinBox] = []
         for ch in range(LED_CHANNELS):
             item = QtWidgets.QTableWidgetItem(str(ch))
@@ -112,23 +169,30 @@ class ControlPanel(QtWidgets.QWidget):
             "lower limit yet; it rejects values it cannot accept.")
         self.all_spin = QtWidgets.QSpinBox()
         self.all_spin.setRange(0, LED_MAX_MA)
-        self.all_fill = QtWidgets.QPushButton("Fill all")
-        self.all_fill.setObjectName("led_fill_button")
-        self.led_apply = QtWidgets.QPushButton("Apply LED currents")
-        self.led_apply.setObjectName("led_apply_button")
-        self.settings_hint = QtWidgets.QLabel("Settings can only be changed while STOPPED.")
-        self.settings_hint.setStyleSheet("color: #555;")
-        sets = QtWidgets.QGroupBox("Settings (applied to the device only when you press Apply)")
-        gl = QtWidgets.QGridLayout(sets)
-        gl.addWidget(QtWidgets.QLabel("Sampling rate"), 0, 0)
-        gl.addWidget(self.fs_spin, 0, 1)
-        gl.addWidget(self.fs_apply, 0, 2)
-        gl.addWidget(self.led_table, 1, 0, 1, 3)
-        gl.addWidget(QtWidgets.QLabel("All channels"), 2, 0)
-        gl.addWidget(self.all_spin, 2, 1)
-        gl.addWidget(self.all_fill, 2, 2)
-        gl.addWidget(self.led_apply, 3, 0, 1, 3)
-        gl.addWidget(self.settings_hint, 4, 0, 1, 3)
+        self.all_fill = _button("Fill all", "led_fill_button")
+        self.led_apply = _button("Apply LED currents", "led_apply_button")
+        self.settings_hint = _muted("Settings can only be changed while STOPPED.")
+        sets, gl = _card("Settings")
+        fs_row = QtWidgets.QHBoxLayout()
+        fs_row.setSpacing(8)
+        fs_row.addWidget(QtWidgets.QLabel("Sampling rate"))
+        fs_row.addStretch(1)
+        fs_row.addWidget(self.fs_spin)
+        fs_row.addWidget(self.fs_apply)
+        gl.addLayout(fs_row)
+        self.led_section = _Collapsible("LED CURRENT (20 CHANNELS)", expanded=False)
+        self.led_section.body.addWidget(self.led_table)
+        self.led_table.setMinimumHeight(260)
+        fill_row = QtWidgets.QHBoxLayout()
+        fill_row.setSpacing(8)
+        fill_row.addWidget(QtWidgets.QLabel("All channels"))
+        fill_row.addStretch(1)
+        fill_row.addWidget(self.all_spin)
+        fill_row.addWidget(self.all_fill)
+        self.led_section.body.addLayout(fill_row)
+        self.led_section.body.addWidget(self.led_apply)
+        gl.addWidget(self.led_section)
+        gl.addWidget(self.settings_hint)
 
         # --- log ---
         self.log = QtWidgets.QPlainTextEdit()
@@ -136,18 +200,21 @@ class ControlPanel(QtWidgets.QWidget):
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(2000)
         self.log.setFixedHeight(120)
-        logbox = QtWidgets.QGroupBox("Event log (every command and state change)")
-        ll = QtWidgets.QVBoxLayout(logbox)
-        ll.addWidget(self.log)
+        self.last_event = _muted("No events yet")
+        self.last_event.setObjectName("last_event")
+        self.last_event.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored,
+                                      QtWidgets.QSizePolicy.Policy.Preferred)
+        self.log_section = _Collapsible("EVENT LOG", expanded=False, summary=self.last_event)
+        self.log_section.body.addWidget(self.log)
 
-        self.led_table.setMinimumHeight(250)
         inner = QtWidgets.QWidget()
+        inner.setObjectName("root")
         left = QtWidgets.QVBoxLayout(inner)
-        left.setContentsMargins(0, 0, 4, 0)
-        left.addWidget(conn)
-        left.addWidget(status)
-        left.addWidget(run)
-        left.addWidget(sets)
+        left.setContentsMargins(0, 0, 6, 0)
+        left.setSpacing(SPACE)
+        for w in (conn, status, run, sets):
+            left.addWidget(w)
+        left.addStretch(1)
         scroll = QtWidgets.QScrollArea()  # keeps the panel usable on small screens
         scroll.setObjectName("panel_scroll")
         scroll.setWidgetResizable(True)
@@ -156,8 +223,9 @@ class ControlPanel(QtWidgets.QWidget):
         scroll.setWidget(inner)
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(SPACE)
         outer.addWidget(scroll, stretch=1)
-        outer.addWidget(logbox)
+        outer.addWidget(self.log_section)
 
         self.connect_btn.clicked.connect(self.on_connect)
         self.disconnect_btn.clicked.connect(self.on_disconnect)
@@ -207,7 +275,9 @@ class ControlPanel(QtWidgets.QWidget):
     def _on_event(self, ev: Event) -> None:
         stamp = time.strftime("%H:%M:%S", time.localtime()) + f".{int(ev.t * 1000) % 1000:03d}"
         tag = "[SIM] " if ev.simulated else ""
-        self.log.appendPlainText(f"{stamp} {tag}{ev.kind}: {ev.text}")
+        line = f"{stamp} {tag}{ev.kind}: {ev.text}"
+        self.log.appendPlainText(line)
+        self.last_event.setText(f"{ev.kind}: {ev.text}")
 
     def refresh(self) -> None:
         c = self.ctl
@@ -215,8 +285,8 @@ class ControlPanel(QtWidgets.QWidget):
         state = c.device_state
         stopped = connected and state == ST_STOPPED
         text = c.state_text
-        self.state_label.setText(f"State: {text}" + ("  (SIMULATED)" if c.simulated else ""))
-        self.state_label.setStyleSheet("font-size: 16px; " + _STATE_STYLE.get(text, "color: #444;"))
+        self.state_label.setText(text + ("  \u00B7  SIMULATED" if c.simulated else ""))
+        self._set_tone(self.state_label, _STATE_TONE.get(text, "muted"))
         bits = []
         if connected:
             bits.append(f"session {c.session_id}" if c.session_id else "no active session")
@@ -250,6 +320,13 @@ class ControlPanel(QtWidgets.QWidget):
                 self._led_spins[ch].setValue(v)
             self._settings_loaded = True
         self.changed.emit()
+
+    @staticmethod
+    def _set_tone(label: QtWidgets.QLabel, tone: str) -> None:
+        if label.property("tone") != tone:
+            label.setProperty("tone", tone)
+            label.style().unpolish(label)
+            label.style().polish(label)
 
     def tick(self) -> None:
         """Called by the main window timer: heartbeat + refresh."""

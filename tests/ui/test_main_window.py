@@ -24,7 +24,7 @@ def test_window_shows_banner_and_synthetic_notice(qapp) -> None:
     w = MainWindow()
     banner = w.findChild(QtWidgets.QLabel, "banner")
     notice = w.findChild(QtWidgets.QLabel, "synthetic_notice")
-    assert "research prototype" in banner.text() and "non-clinical" in banner.text()
+    assert "research prototype" in banner.text().lower() and "non-clinical" in banner.text().lower()
     assert "SYNTHETIC" in notice.text()
     w.close()
 

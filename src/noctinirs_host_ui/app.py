@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 from collections import deque
+from pathlib import Path
 
 # Import PySide6 before pyqtgraph so that pyqtgraph binds to PySide6.
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 import PySide6
 
@@ -16,9 +18,38 @@ from noctinirs_host.control.simulator import DeviceSimulator
 
 from .control_panel import ControlPanel
 from .credits import APP_NAME, BANNER_TEXT, SYNTHETIC_NOTICE, about_text
+from .theme import THEMES, build_qss
 from .synthetic import SAMPLE_RATE_HZ, WINDOW_SECONDS, SyntheticSource
 
 _MAX_POINTS = int(SAMPLE_RATE_HZ * WINDOW_SECONDS)
+
+
+def _arrow_images(theme) -> tuple[str | None, str | None]:
+    """Draw the two small arrow icons for spin/combo boxes in the theme's muted colour.
+    Returns forward-slash paths, or (None, None) if the files cannot be written."""
+    try:
+        folder = Path(tempfile.gettempdir()) / "noctinirs_host_ui"
+        folder.mkdir(exist_ok=True)
+        paths = []
+        for kind in ("up", "down"):
+            pm = QtGui.QPixmap(9, 6)
+            pm.fill(QtCore.Qt.GlobalColor.transparent)
+            painter = QtGui.QPainter(pm)
+            painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            painter.setBrush(QtGui.QColor(theme.muted))
+            pts = [QtCore.QPointF(0.5, 5.5), QtCore.QPointF(8.5, 5.5), QtCore.QPointF(4.5, 0.5)]
+            if kind == "down":
+                pts = [QtCore.QPointF(0.5, 0.5), QtCore.QPointF(8.5, 0.5), QtCore.QPointF(4.5, 5.5)]
+            painter.drawPolygon(QtGui.QPolygonF(pts))
+            painter.end()
+            path = folder / f"arrow_{kind}_{theme.name}.png"
+            if not pm.save(str(path)):
+                return None, None
+            paths.append(path.as_posix())
+        return paths[0], paths[1]
+    except OSError:
+        return None, None
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -34,41 +65,68 @@ class MainWindow(QtWidgets.QMainWindow):
         self._t: deque[float] = deque(maxlen=_MAX_POINTS)
         self._y: deque[float] = deque(maxlen=_MAX_POINTS)
 
+        # --- header: app name + the labels that must always be visible ---
+        title = QtWidgets.QLabel(APP_NAME)
+        title.setObjectName("title")
         banner = QtWidgets.QLabel(BANNER_TEXT)
-        banner.setObjectName("banner")
-        banner.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        banner.setStyleSheet(
-            "background-color: #ffe08a; color: #3b2f00; font-weight: bold; padding: 6px;"
-        )
-
+        banner.setObjectName("banner")  # research prototype, non-clinical
         synthetic = QtWidgets.QLabel(SYNTHETIC_NOTICE)
         synthetic.setObjectName("synthetic_notice")
-        synthetic.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        synthetic.setStyleSheet("color: #8a1c1c; font-weight: bold; padding: 4px;")
+        header = QtWidgets.QFrame()
+        header.setObjectName("header")
+        hl = QtWidgets.QHBoxLayout(header)
+        hl.setContentsMargins(20, 10, 20, 10)
+        hl.setSpacing(14)
+        hl.addWidget(title)
+        hl.addWidget(banner)
+        hl.addStretch(1)
+        hl.addWidget(synthetic)
 
         self.plot = pg.PlotWidget()
         self.plot.setLabel("bottom", "Time", units="s")
         self.plot.setLabel("left", "Intensity (arbitrary units, synthetic)")
-        self.plot.showGrid(x=True, y=True, alpha=0.3)
+        self.plot.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self.plot.showGrid(x=False, y=True, alpha=0.18)
+        self.plot.getPlotItem().hideButtons()
         self.curve = self.plot.plot([], [], pen=pg.mkPen(width=2))
 
         central = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(central)
-        layout.addWidget(banner)
-        layout.addWidget(synthetic)
+        central.setObjectName("root")
+        outer = QtWidgets.QVBoxLayout(central)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        outer.addWidget(header)
         body = QtWidgets.QHBoxLayout()
+        body.setContentsMargins(16, 16, 16, 16)
+        body.setSpacing(16)
         self.panel.setMinimumWidth(380)
-        self.panel.setMaximumWidth(460)
+        self.panel.setMaximumWidth(440)
         body.addWidget(self.panel)
-        right = QtWidgets.QVBoxLayout()
+        plot_card = QtWidgets.QFrame()
+        plot_card.setObjectName("card")
+        pl = QtWidgets.QVBoxLayout(plot_card)
+        pl.setContentsMargins(16, 14, 16, 12)
+        pl.setSpacing(8)
         self.plot_note = QtWidgets.QLabel("Demo signal only - the simulated device sends no measurement data yet.")
         self.plot_note.setObjectName("plot_note")
-        self.plot_note.setStyleSheet("color: #555;")
-        right.addWidget(self.plot_note)
-        right.addWidget(self.plot, stretch=1)
-        body.addLayout(right, stretch=1)
-        layout.addLayout(body, stretch=1)
+        pl.addWidget(self.plot_note)
+        pl.addWidget(self.plot, stretch=1)
+        body.addWidget(plot_card, stretch=1)
+        outer.addLayout(body, stretch=1)
         self.setCentralWidget(central)
+
+        view_menu = self.menuBar().addMenu("&View")
+        theme_menu = view_menu.addMenu("&Theme")
+        group = QtGui.QActionGroup(self)
+        self._theme_actions = {}
+        for key, label in (("light", "&Light"), ("dark", "&Dark")):
+            act = theme_menu.addAction(label)
+            act.setCheckable(True)
+            act.setActionGroup(group)
+            act.triggered.connect(lambda _=False, k=key: self.set_theme(k))
+            self._theme_actions[key] = act
+        self.theme_name = "light"
+        self.set_theme("light")
 
         help_menu = self.menuBar().addMenu("&Help")
         about_action = help_menu.addAction("&About")
@@ -82,6 +140,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ui_timer.setInterval(200)
         self._ui_timer.timeout.connect(self.panel.tick)
         self._ui_timer.start()
+
+    def set_theme(self, name: str) -> None:
+        """Apply a colour theme to the whole application and to the plot."""
+        theme = THEMES[name]
+        self.theme_name = name
+        self._theme_actions[name].setChecked(True)
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            up, down = _arrow_images(theme)
+            app.setStyleSheet(build_qss(theme, up, down))
+        self.plot.setBackground(theme.plot_bg)
+        axis_pen = pg.mkPen(theme.plot_axis)
+        for side in ("left", "bottom"):
+            ax = self.plot.getAxis(side)
+            ax.setPen(axis_pen)
+            ax.setTextPen(axis_pen)
+        self.plot.getPlotItem().getViewBox().setBorder(None)
+        self.curve.setPen(pg.mkPen(theme.accent, width=2))
 
     def _on_timer(self) -> None:
         if self.panel.is_streaming():  # demo curve moves only while the device streams
