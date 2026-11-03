@@ -17,6 +17,7 @@ ui = [
   "PySide6-Essentials==6.12.0",
   "pyqtgraph==0.14.0",
   "numpy==2.5.4",
+  "colorama==0.4.6",  # pyqtgraph dependency, pinned for reproducible builds
 ]
 # Build tool only; not part of the shipped application.
 build = ["pyinstaller==6.22.3"]

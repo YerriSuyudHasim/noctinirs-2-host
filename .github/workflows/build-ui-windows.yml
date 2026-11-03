@@ -48,4 +48,5 @@ jobs:
           path: |
             dist/NoctiNIRS-Host-win32.zip
             dist/build-report.md
+            dist/bundle-manifest.txt
           retention-days: 14
