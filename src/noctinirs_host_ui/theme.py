@@ -34,6 +34,9 @@ class Theme:
     plot_grid: str
     plot_axis: str
     chip_bg: str
+    wl_a: str  # 735 nm line
+    wl_b: str  # 850 nm line
+    tier_marginal: str  # text colour for the 'marginal' quality tier on the plot background
 
 
 LIGHT = Theme(
@@ -41,12 +44,14 @@ LIGHT = Theme(
     muted="#59616F", accent="#1D4ED8", on_accent="#FFFFFF", danger="#C62828",
     on_danger="#FFFFFF", ok="#17703F", warn_bg="#FFF3CF", on_warn="#5F4300",
     plot_bg="#FFFFFF", plot_grid="#E6E9EE", plot_axis="#59616F", chip_bg="#EEF0F3",
+    wl_a="#B83A0B", wl_b="#1D4ED8", tier_marginal="#8A5A00",
 )
 DARK = Theme(
     name="dark", bg="#101318", surface="#181C23", border="#2A313C", text="#E7EAF0",
     muted="#A2ABB9", accent="#7FA8FF", on_accent="#0A1020", danger="#D23A3F",
     on_danger="#FFFFFF", ok="#5CD08A", warn_bg="#3A2F10", on_warn="#F6D77A",
     plot_bg="#181C23", plot_grid="#2A313C", plot_axis="#A2ABB9", chip_bg="#232934",
+    wl_a="#FF9A62", wl_b="#7FA8FF", tier_marginal="#F6D77A",
 )
 THEMES = {"light": LIGHT, "dark": DARK}
 
@@ -79,6 +84,8 @@ def contrast_pairs(t: Theme) -> list[tuple[str, str, str]]:
         ("ok text on surface", t.ok, t.surface), ("warn text", t.on_warn, t.warn_bg),
         ("muted on pressed/selected", t.muted, t.chip_bg), ("text on pressed/selected", t.text, t.chip_bg),
         ("plot axis on plot", t.plot_axis, t.plot_bg),
+        ("735 nm line on plot", t.wl_a, t.plot_bg), ("850 nm line on plot", t.wl_b, t.plot_bg),
+        ("marginal tier on plot", t.tier_marginal, t.plot_bg), ("good tier on plot", t.ok, t.plot_bg),
     ]
 
 
