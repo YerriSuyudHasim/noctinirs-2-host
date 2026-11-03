@@ -77,7 +77,7 @@ def contrast_pairs(t: Theme) -> list[tuple[str, str, str]]:
         ("accent text on surface", t.accent, t.surface),
         ("primary button", t.on_accent, t.accent), ("danger button", t.on_danger, t.danger),
         ("ok text on surface", t.ok, t.surface), ("warn text", t.on_warn, t.warn_bg),
-        ("muted on chip", t.muted, t.chip_bg), ("text on chip", t.text, t.chip_bg),
+        ("muted on pressed/selected", t.muted, t.chip_bg), ("text on pressed/selected", t.text, t.chip_bg),
         ("plot axis on plot", t.plot_axis, t.plot_bg),
     ]
 
@@ -103,23 +103,16 @@ QFrame#header {{ background: {t.surface}; border: none; border-bottom: 1px solid
 QLabel#title {{ font-size: 15px; font-weight: 600; }}
 QLabel#sectionTitle {{ color: {t.muted}; font-size: 11px; font-weight: 600; letter-spacing: 1px; }}
 QLabel#muted {{ color: {t.muted}; }}
-QLabel#plotNote {{ color: {t.muted}; background: transparent; }}
+QLabel#plot_note {{ color: {t.muted}; background: transparent; }}
 
-QLabel#chip {{ background: {t.chip_bg}; color: {t.text}; border-radius: 11px; padding: 3px 10px;
-              font-weight: 600; font-size: 12px; }}
-QLabel#chip[tone="ok"] {{ color: {t.ok}; }}
-QLabel#chip[tone="info"] {{ color: {t.accent}; }}
-QLabel#chip[tone="danger"] {{ background: {t.danger}; color: {t.on_danger}; }}
-QLabel#chip[tone="warn"] {{ background: {t.warn_bg}; color: {t.on_warn}; }}
-QLabel#chip[tone="muted"] {{ color: {t.muted}; }}
 QLabel#banner {{ color: {t.muted}; background: transparent; }}
 QLabel#synthetic_notice {{ background: {t.warn_bg}; color: {t.on_warn}; border-radius: 11px;
                           padding: 3px 12px; font-weight: 600; font-size: 12px; }}
-QLabel#stateText {{ font-size: 20px; font-weight: 600; background: transparent; }}
-QLabel#stateText[tone="ok"] {{ color: {t.ok}; }}
-QLabel#stateText[tone="info"] {{ color: {t.accent}; }}
-QLabel#stateText[tone="danger"] {{ color: {t.danger if t.name == "light" else "#FF8A8E"}; }}
-QLabel#stateText[tone="muted"] {{ color: {t.muted}; }}
+QLabel#state_label {{ font-size: 20px; font-weight: 600; background: transparent; }}
+QLabel#state_label[tone="ok"] {{ color: {t.ok}; }}
+QLabel#state_label[tone="info"] {{ color: {t.accent}; }}
+QLabel#state_label[tone="danger"] {{ color: {t.danger if t.name == "light" else "#FF8A8E"}; }}
+QLabel#state_label[tone="muted"] {{ color: {t.muted}; }}
 
 QPushButton {{ background: {t.surface}; border: 1px solid {t.border}; border-radius: {RADIUS_CONTROL}px;
               padding: 8px 14px; font-weight: 500; }}

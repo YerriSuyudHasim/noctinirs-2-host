@@ -234,3 +234,31 @@ def test_dark_mode_button_toggles_and_stays_in_step_with_the_menu(win):
     b.click()
     b.click()
     assert win.theme_name == "light"
+
+
+S1_OBJECT_NAMES = {
+    QtWidgets.QPushButton: ["connect_button", "disconnect_button", "start_button", "stop_button",
+                            "clear_fault_button", "safe_off_button", "fs_apply_button",
+                            "led_fill_button", "led_apply_button"],
+    QtWidgets.QLabel: ["state_label", "detail_label", "banner", "synthetic_notice", "plot_note"],
+    QtWidgets.QSpinBox: ["fs_spin"],
+    QtWidgets.QComboBox: ["device_combo"],
+    QtWidgets.QTableWidget: ["led_table"],
+    QtWidgets.QPlainTextEdit: ["event_log"],
+    QtWidgets.QScrollArea: ["panel_scroll"],
+}
+
+
+def test_s1_object_names_are_preserved(win):
+    for cls, names in S1_OBJECT_NAMES.items():
+        for name in names:
+            assert win.findChild(cls, name) is not None, f"{cls.__name__} #{name} missing"
+
+
+def test_every_object_name_selector_in_the_style_sheet_matches_a_widget(win):
+    import re
+    from noctinirs_host_ui.theme import LIGHT, build_qss
+    wanted = set(re.findall(r"\bQ[A-Za-z]+#([A-Za-z_][A-Za-z0-9_]*)", build_qss(LIGHT, "x", "y")))
+    present = {w.objectName() for w in win.findChildren(QtWidgets.QWidget)} | {win.objectName()}
+    missing = wanted - present
+    assert not missing, f"style sheet selectors without a widget: {sorted(missing)}"

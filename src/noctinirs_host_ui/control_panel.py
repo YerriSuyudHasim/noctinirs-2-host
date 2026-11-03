@@ -114,7 +114,7 @@ class ControlPanel(QtWidgets.QWidget):
 
         # --- status ---
         self.state_label = QtWidgets.QLabel("NOT CONNECTED")
-        self.state_label.setObjectName("stateText")
+        self.state_label.setObjectName("state_label")  # S1 name, kept
         self.detail_label = _muted("")
         self.detail_label.setObjectName("detail_label")
         status, sl = _card("Device status")
