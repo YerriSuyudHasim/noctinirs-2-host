@@ -129,7 +129,7 @@ def test_every_log_line_is_marked_simulated(win):
     btn(win, "connect_button").click()
     btn(win, "start_button").click()
     lines = [l for l in win.panel.log.toPlainText().splitlines() if l.strip()]
-    assert lines and all("[SIM]" in l for l in lines[2:])
+    assert len(lines) >= 4 and all("[SIM]" in l for l in lines)  # every line, from the first
 
 
 def test_demo_plot_moves_only_while_streaming(win):
@@ -147,3 +147,38 @@ def test_real_device_is_not_offered(win):
     assert "Simulated" in win.panel.device_combo.itemText(0)
     texts = [l.text() for l in win.panel.findChildren(QtWidgets.QLabel)]
     assert any("Real device connection is not available" in t for t in texts)
+
+
+@pytest.mark.parametrize("state_setup", ["stopped", "streaming", "safe_off", "faulted"])
+def test_safe_off_enabled_and_dispatched_in_every_connected_state(win, state_setup):
+    from noctinirs_host.control import protocol as P
+    btn(win, "connect_button").click()
+    if state_setup == "streaming":
+        btn(win, "start_button").click()
+    elif state_setup == "safe_off":
+        btn(win, "safe_off_button").click()
+    elif state_setup == "faulted":
+        win._simulator.state = P.ST_FAULTED
+        win.controller.refresh_status()
+        win.panel.refresh()
+    assert win.controller.state_text.replace("_", "") == state_setup.replace("_", "").upper()
+    b = btn(win, "safe_off_button")
+    assert b.isEnabled()
+    sent = win.controller.counters["sent"]
+    b.click()
+    assert win.controller.counters["sent"] > sent
+    assert win._simulator.state == P.ST_SAFE_OFF
+
+
+def test_safe_off_dispatched_even_when_the_reply_is_lost(win):
+    btn(win, "connect_button").click()
+    win.controller._t.drop_next_replies = 2
+    btn(win, "safe_off_button").click()
+    assert win._simulator.state == 7  # SAFE_OFF reached the device despite lost replies
+
+
+def test_led_current_limit_is_the_protocol_maximum_and_says_so(win):
+    from noctinirs_host.control.protocol import LED_MAX_MA
+    assert all(s.maximum() == LED_MAX_MA == 50 for s in win.panel._led_spins)
+    assert "protocol maximum" in win.panel.led_table.toolTip().lower()
+    assert "does not report" in win.panel.led_table.toolTip().lower()

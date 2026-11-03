@@ -103,6 +103,13 @@ class ControlPanel(QtWidgets.QWidget):
             spin.setRange(0, LED_MAX_MA)
             self.led_table.setCellWidget(ch, 1, spin)
             self._led_spins.append(spin)
+        # The protocol (ADR-0004) fixes 0..50 mA. The device does not report a tighter LED
+        # limit yet (INFO/get_config carry none), so none can be applied here; if a future
+        # firmware reports one, the core must expose it first. The Fs limits, by contrast,
+        # do come from the device (INFO fs_min/fs_max).
+        self.led_table.setToolTip(
+            f"Range 0..{LED_MAX_MA} mA is the protocol maximum. The device does not report a "
+            "lower limit yet; it rejects values it cannot accept.")
         self.all_spin = QtWidgets.QSpinBox()
         self.all_spin.setRange(0, LED_MAX_MA)
         self.all_fill = QtWidgets.QPushButton("Fill all")
