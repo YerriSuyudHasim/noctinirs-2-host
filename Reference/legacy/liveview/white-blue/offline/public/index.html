@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>NoctiNIRS Live View</title>
+  <link rel="icon" href="./favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div id="welcomeScreen" class="screen welcome-screen">
+    <header class="welcome-header">
+      <a class="brand" href="#" aria-label="NoctiNIRS home">
+        <span class="brand-mark" aria-hidden="true">N</span>
+        <span class="brand-copy"><strong>NoctiNIRS</strong><small>Functional near-infrared spectroscopy</small></span>
+      </a>
+      <div class="connection-cluster">
+        <span class="connection-pill"><i id="welcomeWsDot" class="status-dot pending"></i><span id="welcomeWsText">Bridge connecting</span></span>
+        <span class="connection-pill"><i id="welcomeDeviceDot" class="status-dot offline"></i><span id="welcomeDeviceText">Device offline</span></span>
+      </div>
+    </header>
+
+    <main class="welcome-main">
+      <section class="hero-panel">
+        <div class="hero-copy">
+          <span class="section-kicker">NoctiNIRS acquisition workspace</span>
+          <h1>Clean setup. Clear signals.<br><span>Sixteen channels at a glance.</span></h1>
+          <p>Connect the device, configure MBLL and short-separation processing, then monitor both hemispheres with a synchronized ECG-style sweep display.</p>
+          <div class="hero-actions">
+            <button id="newSessionButton" class="button primary large">New live session</button>
+            <button id="demoButton" class="button secondary large">Preview demo</button>
+          </div>
+          <button id="openRecordedButton" class="link-button" disabled title="Session review will be added in a later UI pass">Open recorded session <span>Coming next</span></button>
+        </div>
+
+        <div class="probe-preview" aria-label="Probe geometry preview">
+          <div class="probe-heading"><span>Probe geometry</span><strong>16 long channels · 4 short channels</strong></div>
+          <div class="head-outline">
+            <div class="hemisphere-label left">LEFT</div>
+            <div class="hemisphere-label right">RIGHT</div>
+            <div class="probe-midline"></div>
+            <div id="probeNodes" class="probe-nodes"></div>
+          </div>
+          <div class="probe-legend"><span><i class="legend-source"></i>LED source</span><span><i class="legend-detector"></i>Photodiode</span><span><i class="legend-channel"></i>Long channel</span></div>
+        </div>
+      </section>
+
+      <section class="welcome-cards">
+        <article class="welcome-card">
+          <div class="card-icon">01</div>
+          <div><span>Device</span><strong id="welcomeDeviceStatus">Waiting for connection</strong><small id="welcomeDeviceMeta">ESP32-S3 · ADS131M04</small></div>
+          <button id="welcomeConnectButton" class="compact-button">Connect</button>
+        </article>
+        <article class="welcome-card">
+          <div class="card-icon">02</div>
+          <div><span>Processing</span><strong>MBLL ready</strong><small>735 / 850 nm · Moaveni 1970</small></div>
+          <button id="quickMbllButton" class="compact-button">Review</button>
+        </article>
+        <article class="welcome-card">
+          <div class="card-icon">03</div>
+          <div><span>Last configuration</span><strong id="lastConfigLabel">DPF 6.0 / 6.0</strong><small id="lastScrLabel">Short separation disabled</small></div>
+          <button id="useLastConfigButton" class="compact-button">Use</button>
+        </article>
+      </section>
+    </main>
+  </div>
+
+  <div id="liveScreen" class="screen live-screen hidden">
+    <header class="app-header">
+      <button id="homeButton" class="brand brand-button" aria-label="Return to welcome screen">
+        <span class="brand-mark small">N</span>
+        <span class="brand-copy"><strong>NoctiNIRS</strong><small>Live acquisition</small></span>
+      </button>
+
+      <div class="live-status-strip">
+        <span id="liveStatePill" class="live-pill idle"><i></i><b id="liveStateText">IDLE</b></span>
+        <span><small>Elapsed</small><strong id="elapsedValue">00:00:00</strong></span>
+        <span><small>Frame rate</small><strong id="frameRateValue">0.0 Hz</strong></span>
+        <span><small>Frames</small><strong id="frameCountValue">0</strong></span>
+        <span><small>Drops</small><strong id="packetLossValue">0</strong></span>
+        <span><small>Baseline</small><strong id="baselineStatusValue">Not set</strong></span>
+      </div>
+
+      <div class="header-actions">
+        <button id="diagnosticsButton" class="icon-button" title="Diagnostics" aria-label="Open diagnostics">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M7 12h10M9 18h6"/></svg>
+        </button>
+        <button id="settingsButton" class="button secondary">Settings</button>
+        <button id="stopSessionButton" class="button danger-outline">Stop session</button>
+      </div>
+    </header>
+
+    <div class="app-shell">
+      <aside class="control-sidebar">
+        <section class="sidebar-section session-control">
+          <span class="sidebar-label">Session</span>
+          <button id="startPauseButton" class="button primary full"><span id="startPauseIcon">▶</span><span id="startPauseText">Start acquisition</span></button>
+          <div class="button-pair">
+            <button id="pauseDisplayButton" class="button ghost">Pause display</button>
+            <button id="markerButton" class="button ghost">Add marker</button>
+          </div>
+        </section>
+
+        <section class="sidebar-section">
+          <span class="sidebar-label">Signal view</span>
+          <div class="segmented" role="group" aria-label="Signal view">
+            <button class="segment active" data-view="hb">Hb</button>
+            <button class="segment" data-view="od">OD</button>
+            <button class="segment" data-view="intensity">Intensity</button>
+          </div>
+          <label class="field-label">Sweep window
+            <select id="windowSelect" class="field-control">
+              <option value="10">10 seconds</option>
+              <option value="30" selected>30 seconds</option>
+              <option value="60">60 seconds</option>
+              <option value="120">2 minutes</option>
+            </select>
+          </label>
+          <label class="field-label">Vertical scale
+            <select id="scaleSelect" class="field-control">
+              <option value="2">±2 µM</option>
+              <option value="5" selected>±5 µM</option>
+              <option value="10">±10 µM</option>
+              <option value="20">±20 µM</option>
+            </select>
+          </label>
+        </section>
+
+        <section class="sidebar-section">
+          <div class="section-row"><span class="sidebar-label">Processing</span><button id="resetBaselineButton" class="text-action">Reset baseline</button></div>
+          <div class="info-row"><span>DPF 735</span><strong id="sidebarDpf735">6.00</strong></div>
+          <div class="info-row"><span>DPF 850</span><strong id="sidebarDpf850">6.00</strong></div>
+          <div class="info-row"><span>Short separation</span><strong id="sidebarScrMode">Off</strong></div>
+          <div class="info-row"><span>Regression</span><strong id="sidebarRegression">—</strong></div>
+        </section>
+
+        <section class="sidebar-section compact">
+          <span class="sidebar-label">Legend</span>
+          <div class="trace-legend"><span><i class="trace-swatch hbo"></i>HbO</span><span><i class="trace-swatch hbr"></i>HbR</span><span><i class="cursor-swatch"></i>Live cursor</span></div>
+        </section>
+
+        <div class="sidebar-footer">
+          <span><i id="sidebarDeviceDot" class="status-dot offline"></i><span id="sidebarDeviceText">Device offline</span></span>
+          <small id="sessionNameFooter">No active session</small>
+        </div>
+      </aside>
+
+      <main class="live-main">
+        <section class="dashboard-heading">
+          <div><span class="section-kicker">Bilateral live monitor</span><h1>Hemodynamic channels</h1></div>
+          <div class="heading-actions">
+            <span id="displayNotice" class="notice-pill">Display ready</span>
+            <button id="clearSweepsButton" class="compact-button">Clear sweeps</button>
+          </div>
+        </section>
+
+        <section class="hemisphere-board">
+          <div class="hemisphere-column" data-side="left">
+            <div class="hemisphere-heading"><div><span>LEFT HEMISPHERE</span><strong>CH1–CH8</strong></div><div class="side-status"><i></i>8 channels</div></div>
+            <div id="leftChannelGrid" class="channel-stack"></div>
+          </div>
+          <div class="hemisphere-divider" aria-hidden="true"><span>L</span><i></i><span>R</span></div>
+          <div class="hemisphere-column" data-side="right">
+            <div class="hemisphere-heading"><div><span>RIGHT HEMISPHERE</span><strong>CH9–CH16</strong></div><div class="side-status"><i></i>8 channels</div></div>
+            <div id="rightChannelGrid" class="channel-stack"></div>
+          </div>
+        </section>
+      </main>
+
+      <aside class="detail-sidebar">
+        <section class="selected-channel-card">
+          <div class="selected-top"><span>Selected channel</span><i id="selectedQualityDot" class="quality-dot good"></i></div>
+          <div class="selected-title"><h2 id="selectedChannelName">CH1</h2><span id="selectedHemisphere">LEFT</span></div>
+          <p id="selectedGeometry">L2–PD3 · 30.0 mm</p>
+        </section>
+
+        <section class="detail-section">
+          <span class="sidebar-label">Hemodynamics</span>
+          <div class="value-card"><span>ΔHbO</span><strong id="selectedHbO">—</strong><small>µM</small></div>
+          <div class="value-card"><span>ΔHbR</span><strong id="selectedHbR">—</strong><small>µM</small></div>
+          <div class="value-card subtle"><span>ΔHbT</span><strong id="selectedHbT">—</strong><small>µM</small></div>
+        </section>
+
+        <section class="detail-section">
+          <span class="sidebar-label">Optical pair</span>
+          <div class="info-row"><span id="selectedI735Label">CH1_I735</span><strong id="selectedI735">—</strong></div>
+          <div class="info-row"><span id="selectedI850Label">CH1_I850</span><strong id="selectedI850">—</strong></div>
+          <div class="info-row"><span id="selectedOD735Label">CH1_OD735</span><strong id="selectedOD735">—</strong></div>
+          <div class="info-row"><span id="selectedOD850Label">CH1_OD850</span><strong id="selectedOD850">—</strong></div>
+        </section>
+
+        <section class="detail-section">
+          <span class="sidebar-label">Short-separation correction</span>
+          <div class="scr-summary"><div><span>Mode</span><strong id="selectedScrMode">Disabled</strong></div><div><span>Regressor</span><strong id="selectedRegressor">—</strong></div></div>
+          <div class="info-row"><span>β735</span><strong id="selectedBeta735">—</strong></div>
+          <div class="info-row"><span>β850</span><strong id="selectedBeta850">—</strong></div>
+        </section>
+
+        <section class="detail-section quality-section">
+          <span class="sidebar-label">Signal quality</span>
+          <div class="quality-meter"><span id="qualityMeterFill"></span></div>
+          <div class="info-row"><span>Status</span><strong id="selectedQualityText">Waiting</strong></div>
+          <div class="info-row"><span>Valid samples</span><strong id="selectedValidSamples">0</strong></div>
+        </section>
+      </aside>
+    </div>
+  </div>
+
+  <dialog id="setupDialog" class="modal setup-modal">
+    <form method="dialog" class="modal-card" id="setupForm">
+      <div class="modal-header">
+        <div><span class="section-kicker">New live session</span><h2>Acquisition setup</h2></div>
+        <button id="closeSetupButton" class="close-button" value="cancel" aria-label="Close">×</button>
+      </div>
+
+      <div class="setup-stepper" aria-label="Setup sections">
+        <button type="button" class="step active" data-step="device"><span>1</span>Device</button>
+        <button type="button" class="step" data-step="mbll"><span>2</span>MBLL</button>
+        <button type="button" class="step" data-step="scr"><span>3</span>Short separation</button>
+        <button type="button" class="step" data-step="session"><span>4</span>Session</button>
+      </div>
+
+      <div class="setup-body">
+        <section class="setup-pane active" data-pane="device">
+          <div class="pane-heading"><div><h3>Device and acquisition</h3><p>Configure the bridge, LED currents, and baseline window.</p></div><span id="setupDeviceBadge" class="status-badge offline">Offline</span></div>
+          <div class="form-grid two">
+            <label>Device IP<input id="deviceIpInput" type="text" value="192.168.4.1" spellcheck="false"></label>
+            <label>Acquisition mode<select id="modeSelect"><option value="SCAN" selected>SCAN · all sources</option><option value="SINGLE">SINGLE · validation</option><option value="DARK">DARK · LEDs off</option></select></label>
+            <label>735 nm current<div class="unit-input"><input id="current735Input" type="number" min="0" max="50" value="15"><span>mA</span></div></label>
+            <label>850 nm current<div class="unit-input"><input id="current850Input" type="number" min="0" max="50" value="40"><span>mA</span></div></label>
+            <label>Baseline duration<div class="unit-input"><input id="baselineDurationInput" type="number" min="3" max="60" value="10"><span>s</span></div></label>
+            <label>Baseline estimator<select id="baselineEstimatorSelect"><option value="median" selected>Median</option><option value="mean">Mean</option></select></label>
+          </div>
+          <div class="inline-notice"><i>i</i><span>Dark-current profiles will be connected to this setup in the next processing pass. This prototype uses the raw intensity reference baseline.</span></div>
+        </section>
+
+        <section class="setup-pane" data-pane="mbll">
+          <div class="pane-heading"><div><h3>Modified Beer–Lambert Law</h3><p>Use wavelength-specific DPF values for the 735 and 850 nm pair.</p></div><span class="status-badge ready">Ready</span></div>
+          <div class="choice-cards">
+            <label class="choice-card selected"><input type="radio" name="dpfMode" value="manual" checked><span><strong>Manual DPF</strong><small>Explicit values stored with the session.</small></span></label>
+            <label class="choice-card"><input type="radio" name="dpfMode" value="age-based"><span><strong>Age-based DPF</strong><small>Scholkmann–Wolf wavelength and age model.</small></span></label>
+          </div>
+          <div id="manualDpfFields" class="form-grid two compact-grid">
+            <label>DPF 735 nm<input id="dpf735Input" type="number" min="0.1" max="20" step="0.01" value="6.00"></label>
+            <label>DPF 850 nm<input id="dpf850Input" type="number" min="0.1" max="20" step="0.01" value="6.00"></label>
+          </div>
+          <div id="ageDpfFields" class="form-grid two compact-grid hidden">
+            <label>Subject age<div class="unit-input"><input id="ageYearsInput" type="number" min="0" max="100" step="1" value="28"><span>years</span></div></label>
+            <div class="computed-field"><span>Computed DPF</span><strong id="computedDpfText">735: 6.26 · 850: 5.18</strong></div>
+          </div>
+          <div class="settings-summary"><div><span>Extinction dataset</span><strong>Moaveni 1970</strong></div><div><span>Optical density</span><strong>Natural logarithm</strong></div><div><span>Output</span><strong>ΔHbO / ΔHbR / ΔHbT in µM</strong></div></div>
+        </section>
+
+        <section class="setup-pane" data-pane="scr">
+          <div class="pane-heading"><div><h3>Short-separation regression</h3><p>Select the superficial reference used before MBLL conversion.</p></div><span class="status-badge ready">Optional</span></div>
+          <div class="scr-options">
+            <label class="scr-option selected"><input type="radio" name="scrMode" value="none" checked><span class="scr-distance">OFF</span><span><strong>Disabled</strong><small>Display raw MBLL output.</small></span></label>
+            <label class="scr-option"><input type="radio" name="scrMode" value="5mm"><span class="scr-distance">5</span><span><strong>5 mm only</strong><small>SC1L and SC1R superficial reference.</small></span></label>
+            <label class="scr-option"><input type="radio" name="scrMode" value="8mm"><span class="scr-distance">8</span><span><strong>8 mm only</strong><small>SC2L and SC2R broader reference.</small></span></label>
+            <label class="scr-option"><input type="radio" name="scrMode" value="both"><span class="scr-distance">5+8</span><span><strong>Both distances</strong><small>Dual regressor with ridge stabilization.</small></span></label>
+          </div>
+          <div class="mapping-panel"><div><span>Left hemisphere</span><strong>5 mm: L1–PD2 · 8 mm: L1–PD3</strong></div><div><span>Right hemisphere</span><strong>5 mm: L6–PD1 · 8 mm: L6–PD0</strong></div></div>
+        </section>
+
+        <section class="setup-pane" data-pane="session">
+          <div class="pane-heading"><div><h3>Session information</h3><p>Metadata is stored with the acquisition configuration.</p></div><span class="status-badge ready">Final step</span></div>
+          <div class="form-grid two">
+            <label>Session name<input id="sessionNameInput" type="text" value="NoctiNIRS Live Session"></label>
+            <label>Subject ID<input id="subjectIdInput" type="text" placeholder="e.g. SUB-001"></label>
+            <label>Protocol<select id="protocolSelect"><option>Resting state</option><option>Sleep</option><option>Functional task</option><option>Hardware validation</option></select></label>
+            <label>Operator<input id="operatorInput" type="text" placeholder="Operator name"></label>
+            <label class="span-two">Notes<textarea id="sessionNotesInput" rows="3" placeholder="Optional session notes"></textarea></label>
+          </div>
+        </section>
+      </div>
+
+      <div class="modal-footer">
+        <button id="setupBackButton" type="button" class="button secondary" disabled>Back</button>
+        <div class="modal-footer-right">
+          <button id="setupConnectButton" type="button" class="button secondary">Connect device</button>
+          <button id="setupNextButton" type="button" class="button primary">Continue</button>
+          <button id="launchLiveButton" type="button" class="button primary hidden">Open live view</button>
+        </div>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="settingsDialog" class="modal settings-modal">
+    <form method="dialog" class="modal-card narrow">
+      <div class="modal-header"><div><span class="section-kicker">Live configuration</span><h2>Display and processing</h2></div><button class="close-button" value="cancel">×</button></div>
+      <div class="settings-body">
+        <label>Short-separation mode<select id="liveScrModeSelect"><option value="none">Disabled</option><option value="5mm">5 mm only</option><option value="8mm">8 mm only</option><option value="both">Both 5 + 8 mm</option></select></label>
+        <label>DPF 735<input id="liveDpf735Input" type="number" min="0.1" step="0.01"></label>
+        <label>DPF 850<input id="liveDpf850Input" type="number" min="0.1" step="0.01"></label>
+        <label>Baseline duration<div class="unit-input"><input id="liveBaselineDurationInput" type="number" min="3" max="60"><span>s</span></div></label>
+        <div class="inline-notice"><i>!</i><span>Changing processing parameters resets the live baseline and rolling short-separation models.</span></div>
+      </div>
+      <div class="modal-footer"><span></span><button id="applyLiveSettingsButton" type="button" class="button primary">Apply and reset baseline</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="diagnosticsDialog" class="modal diagnostics-modal">
+    <div class="modal-card diagnostics-card">
+      <div class="modal-header"><div><span class="section-kicker">Device diagnostics</span><h2>Stream and control log</h2></div><button class="close-button" onclick="this.closest('dialog').close()">×</button></div>
+      <div class="diagnostic-grid">
+        <div><span>WebSocket</span><strong id="diagWsValue">Connecting</strong></div><div><span>Device</span><strong id="diagDeviceValue">Offline</strong></div><div><span>Session</span><strong id="diagSessionValue">—</strong></div><div><span>Last frame</span><strong id="diagLastFrameValue">—</strong></div><div><span>UDP / stream CRC</span><strong id="diagCrcValue">0 / 0</strong></div><div><span>Frame quality</span><strong id="diagFrameQualityValue">—</strong></div>
+      </div>
+      <pre id="deviceLog" class="device-log" aria-live="polite"></pre>
+      <div class="modal-footer"><button id="clearLogButton" class="button secondary">Clear log</button><button id="requestStatusButton" class="button primary">Request status</button></div>
+    </div>
+  </dialog>
+
+  <div id="markerMenu" class="popover hidden" role="menu">
+    <button data-marker="Baseline">Baseline</button><button data-marker="Task Start">Task start</button><button data-marker="Task End">Task end</button><button data-marker="Eyes Open">Eyes open</button><button data-marker="Eyes Closed">Eyes closed</button><button data-marker="Custom">Custom…</button>
+  </div>
+
+  <template id="channelCardTemplate">
+    <article class="channel-card" tabindex="0">
+      <div class="channel-meta">
+        <div class="channel-name-row"><strong class="channel-name"></strong><span class="quality-chip">WAIT</span></div>
+        <span class="channel-geometry"></span>
+        <span class="channel-latest"><b class="latest-hbo">—</b><small> / </small><b class="latest-hbr">—</b></span>
+      </div>
+      <div class="plot-stage">
+        <canvas class="sweep-canvas"></canvas>
+        <div class="sweep-cursor"></div>
+        <div class="plot-zero"></div>
+        <span class="scale-top"></span><span class="scale-bottom"></span>
+      </div>
+    </article>
+  </template>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

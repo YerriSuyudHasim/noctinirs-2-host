@@ -1,0 +1,10 @@
+NOCTINIRS fNIRS LIVEVIEW — OFFLINE START
+
+1. Extract the complete ZIP folder.
+2. Connect the laptop to Wi-Fi: NOCTINIRS
+3. Double-click: start_bridge_windows.bat
+4. Keep the black terminal window open.
+5. The dashboard should open at: http://localhost:8000
+
+This offline package already contains the required WebSocket module.
+Do not run npm install while connected to the NOCTINIRS Wi-Fi because that Wi-Fi does not provide internet access.
