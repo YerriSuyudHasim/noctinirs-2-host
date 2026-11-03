@@ -182,3 +182,83 @@ def test_led_current_limit_is_the_protocol_maximum_and_says_so(win):
     assert all(s.maximum() == LED_MAX_MA == 50 for s in win.panel._led_spins)
     assert "protocol maximum" in win.panel.led_table.toolTip().lower()
     assert "does not report" in win.panel.led_table.toolTip().lower()
+
+
+def test_theme_switch_changes_style_plot_and_keeps_behaviour(win):
+    from noctinirs_host_ui.theme import DARK, LIGHT
+    app = QtWidgets.QApplication.instance()
+    assert win.theme_name == "light" and LIGHT.surface in app.styleSheet()
+    win.set_theme("dark")
+    assert win.theme_name == "dark" and DARK.surface in app.styleSheet()
+    assert win.plot.backgroundBrush().color().name().lower() == DARK.plot_bg.lower()
+    btn(win, "connect_button").click()
+    btn(win, "start_button").click()
+    assert "STREAMING" in win.panel.state_label.text()
+    win.set_theme("light")  # leave the shared application in the default theme
+    assert win.plot.backgroundBrush().color().name().lower() == LIGHT.plot_bg.lower()
+
+
+def test_view_menu_offers_both_themes(win):
+    menus = {a.text().replace("&", ""): a for a in win.menuBar().actions()}
+    assert "View" in menus
+    theme_menu = [a for a in menus["View"].menu().actions() if a.menu()][0].menu()
+    assert [a.text().replace("&", "") for a in theme_menu.actions()] == ["Light", "Dark"]
+    theme_menu.actions()[1].trigger()
+    assert win.theme_name == "dark"
+    theme_menu.actions()[0].trigger()
+    assert win.theme_name == "light"
+
+
+def test_collapsible_sections_start_collapsed_and_toggle(win):
+    p = win.panel
+    assert not p.led_section.body_widget.isVisibleTo(p) and not p.log_section.body_widget.isVisibleTo(p)
+    p.led_section.toggle.setChecked(True)
+    assert p.led_section.body_widget.isVisibleTo(p)
+    assert "LED CURRENT" in p.led_section.toggle.text()
+
+
+def test_header_keeps_the_always_visible_labels(win):
+    banner = win.findChild(QtWidgets.QLabel, "banner")
+    notice = win.findChild(QtWidgets.QLabel, "synthetic_notice")
+    assert "non-clinical" in banner.text().lower() and "SIMULATED" in notice.text()
+    assert banner.isVisibleTo(win) and notice.isVisibleTo(win)
+
+
+def test_dark_mode_button_toggles_and_stays_in_step_with_the_menu(win):
+    b = win.dark_btn
+    assert b.text() == "Dark mode: Off" and not b.isChecked() and win.theme_name == "light"
+    b.click()
+    assert win.theme_name == "dark" and b.text() == "Dark mode: On" and b.isChecked()
+    win._theme_actions["light"].trigger()  # menu changes it back; button follows
+    assert win.theme_name == "light" and b.text() == "Dark mode: Off" and not b.isChecked()
+    b.click()
+    b.click()
+    assert win.theme_name == "light"
+
+
+S1_OBJECT_NAMES = {
+    QtWidgets.QPushButton: ["connect_button", "disconnect_button", "start_button", "stop_button",
+                            "clear_fault_button", "safe_off_button", "fs_apply_button",
+                            "led_fill_button", "led_apply_button"],
+    QtWidgets.QLabel: ["state_label", "detail_label", "banner", "synthetic_notice", "plot_note"],
+    QtWidgets.QSpinBox: ["fs_spin"],
+    QtWidgets.QComboBox: ["device_combo"],
+    QtWidgets.QTableWidget: ["led_table"],
+    QtWidgets.QPlainTextEdit: ["event_log"],
+    QtWidgets.QScrollArea: ["panel_scroll"],
+}
+
+
+def test_s1_object_names_are_preserved(win):
+    for cls, names in S1_OBJECT_NAMES.items():
+        for name in names:
+            assert win.findChild(cls, name) is not None, f"{cls.__name__} #{name} missing"
+
+
+def test_every_object_name_selector_in_the_style_sheet_matches_a_widget(win):
+    import re
+    from noctinirs_host_ui.theme import LIGHT, build_qss
+    wanted = set(re.findall(r"\bQ[A-Za-z]+#([A-Za-z_][A-Za-z0-9_]*)", build_qss(LIGHT, "x", "y")))
+    present = {w.objectName() for w in win.findChildren(QtWidgets.QWidget)} | {win.objectName()}
+    missing = wanted - present
+    assert not missing, f"style sheet selectors without a widget: {sorted(missing)}"

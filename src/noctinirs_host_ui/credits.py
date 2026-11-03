@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 APP_NAME = "NoctiNIRS 2 Host"
-BANNER_TEXT = "NoctiNIRS 2 Host - research prototype, non-clinical"
+BANNER_TEXT = "Research prototype \u00B7 non-clinical"
 SYNTHETIC_NOTICE = "SIMULATED DEVICE - SYNTHETIC DATA - no real device is connected"
 NON_CLINICAL_NOTICE = (
     "Research prototype. Not a medical device. Not for diagnosis, monitoring "

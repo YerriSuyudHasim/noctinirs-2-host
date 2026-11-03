@@ -7,7 +7,7 @@ from noctinirs_host_ui.synthetic import SyntheticSource
 
 
 def test_banner_states_prototype_and_non_clinical() -> None:
-    assert "research prototype" in BANNER_TEXT
+    assert "research prototype" in BANNER_TEXT.lower()
     assert "non-clinical" in BANNER_TEXT
 
 
