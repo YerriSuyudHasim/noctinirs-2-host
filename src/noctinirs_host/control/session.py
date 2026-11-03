@@ -16,13 +16,14 @@ from typing import Callable, Protocol
 
 from ..wire.errors import WireError
 from .protocol import (
-    LED_CHANNELS, LED_MAX_MA, OP_CLEAR_FAULT, OP_GET_CONFIG, OP_HEARTBEAT, OP_INFO, OP_SAFE_OFF,
+    LED_CHANNELS, LED_MAX_MA, OP_CLEAR_FAULT, OP_GET_CONFIG, OP_GET_TIME, OP_HEARTBEAT, OP_INFO, OP_SAFE_OFF,
     OP_SET_FS, OP_SET_LED_CURRENT, OP_START, OP_STATUS, OP_STOP, OPCODE_NAMES, ST_STOPPED,
-    ST_STREAMING, TIMED_OPS, Reply, args_host_time, args_set_fs, args_set_led_current,
+    ST_FAULTED, ST_SAFE_OFF, ST_STREAMING, TIMED_OPS, Reply, args_host_time, args_set_fs, args_set_led_current,
     decode_reply, encode_request, state_name,
 )
 
 HEARTBEAT_PERIOD_S = 0.5  # local implementation record
+STATUS_PERIOD_S = 2.0  # host-chosen: keeps the displayed state fresh while not streaming
 
 
 class Transport(Protocol):
@@ -100,6 +101,7 @@ class SessionController:
         self._next_id = 1
         self._seq = 0
         self._last_hb = 0.0
+        self._last_status = 0.0
         self._done: set[int] = set()
         self.last_end: str | None = None
         self._rebooted = False
@@ -176,7 +178,7 @@ class SessionController:
         return reply
 
     def _run(self, name: str, opcode: int, args: bytes = b"", *, extra_retries: int = 0,
-             note: str = "") -> CommandResult:
+             note: str = "", quiet_ok: bool = False) -> CommandResult:
         reply = self._request(opcode, args, extra_retries=extra_retries)
         if reply is None:
             self._log("command", f"{name}{note}: NO REPLY (timeout)")
@@ -187,7 +189,8 @@ class SessionController:
         if reply.status == 1 and opcode not in (OP_START, OP_SAFE_OFF):  # INVALID_STATE
             if opcode in (OP_HEARTBEAT, OP_STOP):
                 self.session_id = 0  # session gone; never adopt another owner's id
-        self._log("command", f"{name}{note}: {reply.status_text} (state {reply.state_text})")
+        if not (quiet_ok and reply.ok):  # periodic traffic stays out of the log unless it fails
+            self._log("command", f"{name}{note}: {reply.status_text} (state {reply.state_text})")
         return CommandResult(name, reply.ok, True, reply.status_text,
                              "ok" if reply.ok else f"device answered {reply.status_text}", reply)
 
@@ -213,7 +216,7 @@ class SessionController:
         self.settings.fs_hz = cfg.reply.fs_hz
         self.settings.current_ma = list(cfg.reply.current_ma)
         self.connected = True
-        self._last_hb = self._clock()
+        self._last_hb = self._last_status = self._clock()
         self._log("link", "connected" + (" to a SIMULATED device" if self.simulated else ""))
         return CommandResult("connect", True, True, "OK", "connected", cfg.reply)
 
@@ -224,8 +227,12 @@ class SessionController:
         self.connected = False
         self.device_state, self.session_id, self.boot_id = None, 0, None
 
-    def refresh_status(self) -> CommandResult:
-        return self._run("status", OP_STATUS, args_host_time(int(self._clock() * 1e6)))
+    def refresh_status(self, *, quiet: bool = False) -> CommandResult:
+        return self._run("status", OP_STATUS, args_host_time(int(self._clock() * 1e6)),
+                         quiet_ok=quiet)
+
+    def get_time(self) -> CommandResult:
+        return self._run("get_time", OP_GET_TIME, args_host_time(int(self._clock() * 1e6)))
 
     def start(self) -> CommandResult:
         if not self.connected:
@@ -241,6 +248,8 @@ class SessionController:
     def stop(self) -> CommandResult:
         if not self.connected:
             return self._reject("stop_stream", "not connected")
+        if self.device_state != ST_STREAMING:
+            return self._reject("stop_stream", f"state is {self.state_text}, not STREAMING")
         res = self._run("stop_stream", OP_STOP)
         if res.ok:
             self.last_end = "HOST_STOP"
@@ -256,6 +265,8 @@ class SessionController:
     def clear_fault(self) -> CommandResult:
         if not self.connected:
             return self._reject("clear_fault", "not connected")
+        if self.device_state not in (ST_SAFE_OFF, ST_FAULTED):
+            return self._reject("clear_fault", f"nothing to clear (state is {self.state_text})")
         return self._run("clear_fault", OP_CLEAR_FAULT)
 
     def set_fs(self, fs_hz: int) -> CommandResult:
@@ -295,13 +306,19 @@ class SessionController:
     # --- periodic work ---------------------------------------------------------------
     def tick(self) -> None:
         """Call a few times per second. Sends a heartbeat while streaming."""
-        if not self.connected or self.device_state != ST_STREAMING:
+        if not self.connected:
             return
         now = self._clock()
+        if self.device_state != ST_STREAMING:
+            if now - self._last_status >= STATUS_PERIOD_S:
+                self._last_status = now
+                self.refresh_status(quiet=True)
+            return
         if now - self._last_hb < HEARTBEAT_PERIOD_S:
             return
         self._last_hb = now
-        res = self._run("heartbeat", OP_HEARTBEAT, args_host_time(int(now * 1e6)))
+        res = self._run("heartbeat", OP_HEARTBEAT, args_host_time(int(now * 1e6)),
+                        quiet_ok=True)
         if res.sent and not res.ok and self.device_state != ST_STREAMING:
             self.last_end = "LINK_LOSS (device stopped the stream)"
             self._log("link", "device is no longer streaming: " + self.last_end)
