@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 APP_NAME = "NoctiNIRS 2 Host"
 BANNER_TEXT = "NoctiNIRS 2 Host - research prototype, non-clinical"
-SYNTHETIC_NOTICE = "SYNTHETIC DATA - no device connected"
+SYNTHETIC_NOTICE = "SIMULATED DEVICE - SYNTHETIC DATA - no real device is connected"
 NON_CLINICAL_NOTICE = (
     "Research prototype. Not a medical device. Not for diagnosis, monitoring "
     "or any clinical decision."
