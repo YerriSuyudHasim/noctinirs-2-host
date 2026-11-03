@@ -68,6 +68,8 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.setWindowTitle(f"{APP_NAME} (S2: simulated device)")
         self.resize(1240, 880)
+        # A closed window is destroyed: the application style sheet re-styles every live widget.
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, True)
 
         self.geometry = load_geometry(geometry_path())
         self._simulator = DeviceSimulator(geometry=self.geometry)
