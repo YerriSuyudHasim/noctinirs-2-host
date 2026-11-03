@@ -125,6 +125,7 @@ QPushButton {{ background: {t.surface}; border: 1px solid {t.border}; border-rad
               padding: 8px 14px; font-weight: 500; }}
 QPushButton:hover {{ border-color: {t.accent}; }}
 QPushButton:pressed {{ background: {t.chip_bg}; }}
+QPushButton:checked {{ background: {t.accent}; color: {t.on_accent}; border-color: {t.accent}; }}
 QPushButton:disabled {{ color: {t.muted}; background: {t.bg}; border-color: {t.border}; }}
 QPushButton[role="primary"] {{ background: {t.accent}; color: {t.on_accent}; border-color: {t.accent}; }}
 QPushButton[role="primary"]:disabled {{ background: {t.chip_bg}; color: {t.muted}; border-color: {t.border}; }}

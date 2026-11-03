@@ -222,3 +222,15 @@ def test_header_keeps_the_always_visible_labels(win):
     notice = win.findChild(QtWidgets.QLabel, "synthetic_notice")
     assert "non-clinical" in banner.text().lower() and "SIMULATED" in notice.text()
     assert banner.isVisibleTo(win) and notice.isVisibleTo(win)
+
+
+def test_dark_mode_button_toggles_and_stays_in_step_with_the_menu(win):
+    b = win.dark_btn
+    assert b.text() == "Dark mode: Off" and not b.isChecked() and win.theme_name == "light"
+    b.click()
+    assert win.theme_name == "dark" and b.text() == "Dark mode: On" and b.isChecked()
+    win._theme_actions["light"].trigger()  # menu changes it back; button follows
+    assert win.theme_name == "light" and b.text() == "Dark mode: Off" and not b.isChecked()
+    b.click()
+    b.click()
+    assert win.theme_name == "light"

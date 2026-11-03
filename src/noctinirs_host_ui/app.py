@@ -81,6 +81,13 @@ class MainWindow(QtWidgets.QMainWindow):
         hl.addWidget(banner)
         hl.addStretch(1)
         hl.addWidget(synthetic)
+        self.dark_btn = QtWidgets.QPushButton("Dark mode: Off")
+        self.dark_btn.setObjectName("dark_mode_button")
+        self.dark_btn.setCheckable(True)
+        self.dark_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.dark_btn.setToolTip("Switch between the light and the dark theme")
+        self.dark_btn.toggled.connect(lambda on: self.set_theme("dark" if on else "light"))
+        hl.addWidget(self.dark_btn)
 
         self.plot = pg.PlotWidget()
         self.plot.setLabel("bottom", "Time", units="s")
@@ -146,6 +153,11 @@ class MainWindow(QtWidgets.QMainWindow):
         theme = THEMES[name]
         self.theme_name = name
         self._theme_actions[name].setChecked(True)
+        on = name == "dark"  # keep the header button in step with the menu
+        self.dark_btn.blockSignals(True)
+        self.dark_btn.setChecked(on)
+        self.dark_btn.setText("Dark mode: On" if on else "Dark mode: Off")
+        self.dark_btn.blockSignals(False)
         app = QtWidgets.QApplication.instance()
         if app is not None:
             up, down = _arrow_images(theme)
