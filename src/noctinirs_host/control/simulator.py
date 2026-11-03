@@ -102,6 +102,10 @@ class DeviceSimulator:
     # --- dispatch --------------------------------------------------------------
     def _dispatch(self, req) -> bytes:
         op, args = req.opcode, req.args
+        # MODEL CHOICE: no per-endpoint high-water mark for mutation request ids. The local
+        # implementation record (refinement 2) adds one in the firmware; this model only
+        # keeps the 4-entry exact-match cache, so a stale mutation after cache eviction
+        # is executed here but would be rejected by the firmware.
         if op in MUTATING_OPS:
             hit = self._cache.get(req.req_id)
             if hit is not None:
@@ -112,6 +116,9 @@ class DeviceSimulator:
                     return c_reply
                 return self._reply(req.req_id, op, STATUS_INVALID_ARG)
         reply, cacheable = self._execute(req, op, args)
+        # MODEL CHOICE: replies to rejected mutations (INVALID_ARG / INVALID_STATE /
+        # PRECONDITION_FAILED) are cached like successful ones; the documents only say that
+        # exact cached acknowledgements are returned, not which outcomes are cached.
         if cacheable and op in MUTATING_OPS:
             self._cache[req.req_id] = (op, args, req.session_id, reply)
             while len(self._cache) > CACHE_ENTRIES:
@@ -140,6 +147,10 @@ class DeviceSimulator:
                 self.last_end_reason = "SAFE_OFF"
             return self._reply(rid, op, STATUS_OK), False
         if op == OP_INFO:
+            # MODEL CHOICE: the field list is the documented subset only (frames/capture
+            # from the local implementation record; duration, limit_s, single_run, fs_min,
+            # fs_max from LED_HOST_CONTROL.md) plus a `sim_model` tag. The firmware INFO text
+            # has more fields (for example short_policy and i2c) that this model omits.
             text = (f"frames=unsupported;capture=unsupported;duration=HOST;limit_s=0;single_run=0;"
                     f"fs_min={FS_MIN};fs_max={FS_MAX};sim_model={FIRMWARE_PIN[:7]}")
             return self._reply(rid, op, STATUS_OK, text.encode("ascii")), False
