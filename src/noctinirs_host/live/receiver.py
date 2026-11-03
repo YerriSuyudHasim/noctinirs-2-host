@@ -58,6 +58,12 @@ class FrameReceiver:
         if env.msg_type != MSG_FRAME:
             self.counters["not_frame"] += 1
             return "not_frame"
+        # A new session ends the old one first, whatever this frame turns out to be: old
+        # values must never stay on screen under a new session (PR31-F1). reset() clears
+        # buffers and the per-session counters; reject counters stay cumulative.
+        if self.session_id != env.session_id:
+            self.reset()
+            self.session_id = env.session_id
         frame = self.rejects.parse(env.payload)
         if frame is None:
             self.counters["rejected"] += 1
@@ -70,9 +76,6 @@ class FrameReceiver:
             self.counters["geometry_mismatch"] += 1
             return "geometry_mismatch"
 
-        if self.session_id != env.session_id:
-            self.reset()
-            self.session_id = env.session_id
         self.simulated = env.simulated if self.simulated is None else (self.simulated and env.simulated)
         self.ts_estimated = self.ts_estimated or env.ts_estimated
         if self.t0_us is None:
