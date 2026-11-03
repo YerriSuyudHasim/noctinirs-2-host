@@ -14,6 +14,9 @@ import time
 from collections import OrderedDict
 from typing import Callable
 
+from ..geometry import Geometry
+from ..live.synth import SAMPLE_COUNT, SignalModel, build_opt2_payload
+from ..wire import optical as opt
 from ..wire.envelope import PROTOCOL_VERSION
 from ..wire.errors import WireError
 from .protocol import (
@@ -21,7 +24,8 @@ from .protocol import (
     OP_GET_TIME, OP_HEARTBEAT, OP_INFO, OP_SAFE_OFF, OP_SET_FS, OP_SET_LED_CURRENT, OP_START,
     OP_STATUS, OP_STOP, ST_FAULTED, ST_SAFE_OFF, ST_STOPPED, ST_STREAMING, STATUS_BAD_FRAME,
     STATUS_INVALID_ARG, STATUS_INVALID_STATE, STATUS_OK, STATUS_PRECONDITION_FAILED,
-    STATUS_RESERVED_FLAGS, STATUS_UNKNOWN_COMMAND, TIMED_OPS, decode_request, encode_reply,
+    STATUS_RESERVED_FLAGS, STATUS_UNKNOWN_COMMAND, TIMED_OPS, decode_request, encode_frame,
+    encode_reply,
 )
 
 FS_MIN, FS_MAX = 2, 10  # docs/LED_HOST_CONTROL.md (integer Hz)
@@ -34,8 +38,18 @@ CACHE_ENTRIES = 4
 class DeviceSimulator:
     """Handles one datagram at a time; time comes from an injectable clock."""
 
-    def __init__(self, clock: Callable[[], float] = time.monotonic, boot_id: int = 0x5151_0001) -> None:
+    def __init__(self, clock: Callable[[], float] = time.monotonic, boot_id: int = 0x5151_0001,
+                 geometry: Geometry | None = None, seed: int = 1) -> None:
         self._clock = clock
+        self.model = SignalModel(geometry, seed)
+        self.geometry_map_id = geometry.geometry_map_id if geometry is not None else 1
+        # Test / demo knobs for the frame stream (simulator only)
+        self.dead_detectors: set[int] = set()  # AIN indexes reported as not verified
+        self.warmup_frames = 0  # first N frames of a session carry FF_WARMUP (not science)
+        self.frames_sent = 0
+        self._frame_seq = 0
+        self._next_frame_at = 0.0
+        self._t0 = 0.0
         self.boot_id = boot_id
         self.state = ST_STOPPED
         self.fault = 0
@@ -125,6 +139,33 @@ class DeviceSimulator:
                 self._cache.popitem(last=False)
         return reply
 
+    # --- frame stream -------------------------------------------------------
+    def emit_due(self, limit: int = 100) -> list[bytes]:
+        """FRAME datagrams that fall due by now (empty unless STREAMING). At most `limit`
+        per call; a long stall is caught up on the next calls, never skipped."""
+        self.poll()
+        out: list[bytes] = []
+        if self.state != ST_STREAMING:
+            return out
+        now = self._clock()
+        period = 1.0 / self.fs_hz
+        while self._next_frame_at <= now and len(out) < limit:
+            t = self._next_frame_at - self._t0
+            specs = [self.model.slot_spec(s, t, self.current_ma[s], frozenset(self.dead_detectors))
+                     for s in range(opt.SLOT_COUNT)]
+            flags = opt.FF_WARMUP if self._frame_seq < self.warmup_frames else 0
+            payload = build_opt2_payload(specs, frame_sequence=self._frame_seq,
+                                         first_sample=self._frame_seq * SAMPLE_COUNT,
+                                         geometry_map_id=self.geometry_map_id, frame_flags=flags)
+            self._msg_seq = (self._msg_seq + 1) & 0xFFFFFFFF
+            out.append(encode_frame(payload, simulated=True, session_id=self.session_id,
+                                    sequence=self._msg_seq,
+                                    timestamp_us=int(self._next_frame_at * 1_000_000)))
+            self._frame_seq += 1
+            self.frames_sent += 1
+            self._next_frame_at += period
+        return out
+
     def _is_owner(self, session_id: int) -> bool:
         return self.state == ST_STREAMING and session_id == self.session_id and self.session_id != 0
 
@@ -179,6 +220,10 @@ class DeviceSimulator:
             self._next_session += 1
             self._owner_active_at, self._grace_started_at = self._clock(), None
             self.last_end_reason = None
+            # MODEL CHOICE: frame_sequence restarts at 0 for each session; the first frame
+            # is due one period after START.
+            self._frame_seq, self._t0 = 0, self._clock()
+            self._next_frame_at = self._t0 + 1.0 / self.fs_hz
             return self._reply(rid, op, STATUS_OK), True
         if op == OP_STOP:
             if not self._is_owner(req.session_id):

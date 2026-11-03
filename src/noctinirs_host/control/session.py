@@ -16,6 +16,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Protocol
 
+from ..wire.envelope import MSG_FRAME, parse_envelope
 from ..wire.errors import WireError
 from .protocol import (
     LED_CHANNELS, LED_MAX_MA, OP_CLEAR_FAULT, OP_GET_CONFIG, OP_GET_TIME, OP_HEARTBEAT, OP_INFO, OP_SAFE_OFF,
@@ -41,6 +42,10 @@ class LoopbackTransport:
         self._queue: list[bytes] = []
         self.drop_next_replies = 0  # test hook: lose replies
         self.duplicate_next_reply = False  # test hook: deliver a reply twice
+        self.drop_next_frames = 0  # test hook: lose FRAME datagrams
+        self.duplicate_next_frame = False  # test hook: deliver a frame twice
+        self.reorder_next_frames = False  # test hook: swap the next two frames
+        self._held: bytes | None = None
 
     def send(self, datagram: bytes) -> None:
         for reply in self.simulator.handle(datagram):
@@ -52,7 +57,26 @@ class LoopbackTransport:
                 self.duplicate_next_reply = False
                 self._queue.append(reply)
 
+    def _pull_frames(self) -> None:
+        for fr in self.simulator.emit_due():
+            if self.drop_next_frames:
+                self.drop_next_frames -= 1
+                continue
+            if self.reorder_next_frames:
+                if self._held is None:
+                    self._held = fr  # deliver it after the next frame
+                    continue
+                self._queue.extend([fr, self._held])
+                self._held, self.reorder_next_frames = None, False
+                continue
+            self._queue.append(fr)
+            if self.duplicate_next_frame:
+                self.duplicate_next_frame = False
+                self._queue.append(fr)
+
     def receive(self, timeout_s: float) -> list[bytes]:
+        if not self._queue:  # replies queued by send() always go first
+            self._pull_frames()
         return [self._queue.pop(0)] if self._queue else []
 
 
@@ -99,7 +123,7 @@ class SessionController:
         self.events: list[Event] = []
         self.listeners: list[Callable[[Event], None]] = []
         self.counters = dict(sent=0, retries=0, timeouts=0, unmatched=0, duplicate_replies=0,
-                             malformed=0, local_rejects=0)
+                             malformed=0, local_rejects=0, frames_routed=0, frames_unrouted=0)
         self._next_id = 1
         self._seq = 0
         self._last_hb = 0.0
@@ -107,6 +131,8 @@ class SessionController:
         self._done: set[int] = set()
         self.last_end: str | None = None
         self._rebooted = False
+        # FRAME datagrams go here, untouched; the live-view receiver does the parsing.
+        self.frame_sink: Callable[[bytes], object] | None = None
 
     # --- bookkeeping ----------------------------------------------------
     def _log(self, kind: str, text: str) -> None:
@@ -150,7 +176,23 @@ class SessionController:
         self.counters["timeouts"] += 1
         return None
 
+    def _route_frame(self, raw: bytes) -> bool:
+        """True if `raw` is a FRAME datagram (consumed here, never mistaken for a reply)."""
+        try:
+            is_frame = parse_envelope(raw).msg_type == MSG_FRAME
+        except WireError:
+            return False  # decode_reply counts it as malformed
+        if is_frame:
+            if self.frame_sink is None:
+                self.counters["frames_unrouted"] += 1
+            else:
+                self.counters["frames_routed"] += 1
+                self.frame_sink(raw)
+        return is_frame
+
     def _accept(self, raw: bytes, rid: int, opcode: int, args: bytes) -> Reply | None:
+        if self._route_frame(raw):
+            return None
         try:
             reply = decode_reply(raw)
         except WireError:
@@ -305,11 +347,22 @@ class SessionController:
             self.settings.current_ma[channel] = current_ma
         return res
 
+    def pump(self) -> None:
+        """Hand pending FRAME datagrams to the sink. Replies seen here are late/duplicates."""
+        for _ in range(256):  # bounded work per call
+            batch = self._t.receive(0.0)
+            if not batch:
+                return
+            for raw in batch:
+                if not self._route_frame(raw):
+                    self.counters["unmatched"] += 1
+
     # --- periodic work ---------------------------------------------------------------
     def tick(self) -> None:
         """Call a few times per second. Sends a heartbeat while streaming."""
         if not self.connected:
             return
+        self.pump()
         now = self._clock()
         if self.device_state != ST_STREAMING:
             if now - self._last_status >= STATUS_PERIOD_S:

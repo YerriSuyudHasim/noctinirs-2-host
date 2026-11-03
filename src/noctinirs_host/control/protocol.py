@@ -16,7 +16,8 @@ import zlib
 from dataclasses import dataclass, field
 
 from ..wire.envelope import (
-    ENVELOPE_VERSION, HEADER_SIZE, MAGIC, MAX_PAYLOAD, MSG_REPLY, MSG_REQUEST,
+    ENVELOPE_VERSION, FLAG_SIMULATED, HEADER_SIZE, MAGIC, MAX_PAYLOAD, MSG_FRAME, MSG_REPLY,
+    MSG_REQUEST,
     PROTOCOL_VERSION, parse_envelope,
 )
 from ..wire.errors import WireError
@@ -137,6 +138,13 @@ def encode_reply(req_id: int, opcode: int, status: int, *, state: int, fault: in
     body += _PREFIX.pack(state, fault, 1 if simulated else 0, boot_id, t_rx_us)
     body += extension if status == STATUS_OK else b""
     return _envelope(MSG_REPLY, body, 1 if simulated else 0, session_id, sequence, timestamp_us)
+
+
+def encode_frame(payload: bytes, *, simulated: bool, session_id: int, sequence: int,
+                 timestamp_us: int) -> bytes:
+    """Device->host FRAME datagram (simulator side). The payload is built elsewhere."""
+    return _envelope(MSG_FRAME, payload, FLAG_SIMULATED if simulated else 0, session_id,
+                     sequence, timestamp_us)
 
 
 @dataclass(frozen=True)
