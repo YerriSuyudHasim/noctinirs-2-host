@@ -27,17 +27,18 @@ These rules are part of the decision. They limit which Qt parts may be used.
 
 1. Depend on **PySide6-Essentials only**. Do not install the `PySide6` meta-package or **PySide6-Addons**, and do not use QtWebEngine. Reason: Essentials covers what the host needs (QtCore, QtGui, QtWidgets, and related modules). The Addons package holds many extra modules (for example Qt Charts and Qt Data Visualization), and its PyPI page does not make clear which licensing terms apply per module. Avoiding it removes that doubt.
 2. Plots use pyqtgraph (MIT), not Qt Charts.
-3. PySide6 is offered by its publisher under "LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only" (or a commercial license). This project uses it under **LGPLv3**: Qt is used unmodified and as separate shared libraries, which is why folder (onedir) packaging is preferred over a single-file executable.
+3. PySide6 is offered by its publisher under "LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only" (or a commercial license). This project uses it under **LGPLv3**: Qt is used unmodified and as separate shared libraries, which is why folder (onedir) packaging is preferred over a single-file executable. These measures are intended to support LGPL compliance; they do not guarantee it. Compliance is checked on the actual release artifact (see rule 7).
 4. Every release ships a `THIRD_PARTY_NOTICES` file with the name, version, license and license text of each bundled component, and the application's About dialog credits Qt/PySide6 and pyqtgraph. The notice states that Qt is unmodified and where its source can be obtained, and that users may replace the Qt libraries.
 5. Every new dependency still needs purpose, license and version pin in its PR (see `AGENTS.md`). Dependencies with GPL/AGPL-only or commercial-only terms are not accepted without a new ADR.
 6. PyInstaller may be used for building: its license page states that the executables it produces can carry any license, subject to the licenses of the dependencies.
+7. Before each public release, the release PR records a license check of the built artifact: the actual list of bundled components (Qt libraries, Python runtime, NumPy and any other packages PyInstaller collected), each component's license, and whether the LGPL obligations for Qt are met for that exact bundle. The PyInstaller exception is conditional on the dependency licenses, so a component with incompatible terms blocks the release until resolved.
 
 ## Consequences
 
 - Positive: a mature instrument-grade UI toolkit, one standalone application, and a license path that is free for public distribution when the rules above are followed.
 - Negative: large package (Qt bundled). Target is at most about 100-200 MB; the first release PR must measure the real size, and heavy scientific libraries (for example SciPy) must not be added without checking the budget.
 - Negative: single-file executables and antivirus false positives. Prefer folder packaging, publish SHA-256 checksums with releases.
-- pyqtgraph's repository page (as read on 2026-11-03) lists Python 3.12 or later and NumPy 2.0 or later. The repository currently allows Python 3.11 (`requires-python = ">=3.11"`) while pinning 3.12.7 for CI. The first UI PR must verify the compatible versions and, if needed, raise the minimum Python version.
+- pyqtgraph's own sources disagree on version requirements (read 2026-11-03): the PyPI metadata of release 0.14.0 states Python >= 3.10; the development branch `pyproject.toml` states Python >= 3.12 and NumPy >= 2.2.0; its README text still says NumPy 2.0+. Treat the development-branch figures as the stricter, forward-looking policy and the PyPI metadata as what the published release declares. This repository currently allows Python 3.11 (`requires-python = ">=3.11"`) while pinning 3.12.7 for CI. The first UI PR must pin an exact pyqtgraph release, verify its declared requirements against it, and, if needed, raise the minimum Python version.
 - A web UI (for example FastAPI with a browser front end) remains possible later because the core is UI-independent; it would need its own ADR.
 
 ## Not decided here
@@ -53,5 +54,5 @@ These rules are part of the decision. They limit which Qt parts may be used.
 - PySide6 on PyPI: https://pypi.org/project/PySide6/
 - PySide6-Essentials on PyPI: https://pypi.org/project/PySide6-Essentials/
 - PySide6-Addons on PyPI: https://pypi.org/project/PySide6-Addons/
-- pyqtgraph on PyPI (license MIT) and GitHub: https://pypi.org/project/pyqtgraph/ , https://github.com/pyqtgraph/pyqtgraph
+- pyqtgraph on PyPI (license MIT) and GitHub (README and `pyproject.toml`): https://pypi.org/project/pyqtgraph/ , https://github.com/pyqtgraph/pyqtgraph
 - PyInstaller license page: https://pyinstaller.org/en/stable/license.html
