@@ -2,7 +2,7 @@
 
 PC host application for the NoctiNIRS 2 fNIRS device.
 
-Status: **step 1** (geometry loader, wire parsers, gate recheck) plus the **S0 UI spike** (window, synthetic plot, packaging test). No device I/O; the UI shows synthetic data only. Governance rules for contributors and AI agents are in [AGENTS.md](AGENTS.md); the project record is [project.yaml](project.yaml).
+Status: **step 1** (geometry loader, wire parsers, gate recheck) the **S0 UI spike** (window, packaging test) and the **S1 simulated control** (connect, start/stop, Safe Off, Fs, LED current). No device I/O: the app talks only to a built-in simulator and shows demo data. Governance rules for contributors and AI agents are in [AGENTS.md](AGENTS.md); the project record is [project.yaml](project.yaml).
 
 - Firmware and the device protocol: [YerriSuyudHasim/noctinirs-2](https://github.com/YerriSuyudHasim/noctinirs-2)
 - Language: Python. Reference version pinned to **3.12.7** (CI and `.python-version`); the code is also tested locally on 3.13. `requires-python = ">=3.11"` is the lowest allowed version. UI framework: PySide6 (desktop), see [ADR-0001](docs/adr/0001-ui-framework.md); no UI code yet.
@@ -35,7 +35,7 @@ python -m pip install -e ".[dev,ui]"
 python -m noctinirs_host_ui
 ```
 
-The window shows a banner, a synthetic demo signal (not device data) and an About dialog with third-party credits.
+The window shows a banner, a control panel for a **built-in simulated device** (Connect, Start, Stop, SAFE OFF, sampling rate, LED current per channel, event log), a demo signal (not device data) and an About dialog with third-party credits. A real device cannot be connected in this version.
 
 Build a standalone Windows folder app (PyInstaller, onedir) and a size and license report:
 

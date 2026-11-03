@@ -1,4 +1,4 @@
-"""Main window for the S0 spike: banner, one synthetic plot, About dialog."""
+"""Main window: banner, S1 control panel (simulated device), demo plot, About dialog."""
 
 from __future__ import annotations
 
@@ -11,7 +11,10 @@ import pyqtgraph as pg
 import PySide6
 
 from noctinirs_host import __version__ as CORE_VERSION
+from noctinirs_host.control.session import LoopbackTransport, SessionController
+from noctinirs_host.control.simulator import DeviceSimulator
 
+from .control_panel import ControlPanel
 from .credits import APP_NAME, BANNER_TEXT, SYNTHETIC_NOTICE, about_text
 from .synthetic import SAMPLE_RATE_HZ, WINDOW_SECONDS, SyntheticSource
 
@@ -21,9 +24,12 @@ _MAX_POINTS = int(SAMPLE_RATE_HZ * WINDOW_SECONDS)
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle(f"{APP_NAME} (S0 spike)")
-        self.resize(900, 560)
+        self.setWindowTitle(f"{APP_NAME} (S1: simulated device)")
+        self.resize(1240, 880)
 
+        self._simulator = DeviceSimulator()
+        self.controller = SessionController(LoopbackTransport(self._simulator))
+        self.panel = ControlPanel(self.controller)
         self._source = SyntheticSource()
         self._t: deque[float] = deque(maxlen=_MAX_POINTS)
         self._y: deque[float] = deque(maxlen=_MAX_POINTS)
@@ -50,7 +56,18 @@ class MainWindow(QtWidgets.QMainWindow):
         layout = QtWidgets.QVBoxLayout(central)
         layout.addWidget(banner)
         layout.addWidget(synthetic)
-        layout.addWidget(self.plot, stretch=1)
+        body = QtWidgets.QHBoxLayout()
+        self.panel.setMinimumWidth(380)
+        self.panel.setMaximumWidth(460)
+        body.addWidget(self.panel)
+        right = QtWidgets.QVBoxLayout()
+        self.plot_note = QtWidgets.QLabel("Demo signal only - the simulated device sends no measurement data yet.")
+        self.plot_note.setObjectName("plot_note")
+        self.plot_note.setStyleSheet("color: #555;")
+        right.addWidget(self.plot_note)
+        right.addWidget(self.plot, stretch=1)
+        body.addLayout(right, stretch=1)
+        layout.addLayout(body, stretch=1)
         self.setCentralWidget(central)
 
         help_menu = self.menuBar().addMenu("&Help")
@@ -59,8 +76,16 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._timer = QtCore.QTimer(self)
         self._timer.setInterval(int(1000 / SAMPLE_RATE_HZ))
-        self._timer.timeout.connect(self.tick)
+        self._timer.timeout.connect(self._on_timer)
         self._timer.start()
+        self._ui_timer = QtCore.QTimer(self)
+        self._ui_timer.setInterval(200)
+        self._ui_timer.timeout.connect(self.panel.tick)
+        self._ui_timer.start()
+
+    def _on_timer(self) -> None:
+        if self.panel.is_streaming():  # demo curve moves only while the device streams
+            self.tick()
 
     def tick(self) -> None:
         """Append one synthetic sample and redraw."""
