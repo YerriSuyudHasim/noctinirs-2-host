@@ -33,7 +33,7 @@ Every host change that touches the protocol MUST record the firmware commit SHA 
 ## Technology baseline
 
 - Language: Python (exact version pinned by the first tooling PR).
-- UI framework: **TBD**, decided by host ADR-0001. Candidates include a desktop UI (for example PySide6) and a web UI served locally (for example FastAPI with a browser front end).
+- UI framework: **PySide6** (desktop), with pyqtgraph for plots, decided by [host ADR-0001](docs/adr/0001-ui-framework.md). Use PySide6-Essentials only (no PySide6-Addons, no QtWebEngine) and keep every dependency free and open source; the licensing rules are in the ADR. A web UI would need a new ADR.
 - Architecture: the host core MUST be importable and testable without any UI. Keep protocol codec, transport (UDP), session control, recording, and signal processing in a UI-independent core package. UI layers depend on the core; the core never depends on a UI, so desktop and web front ends can share one core.
 - Do not add dependencies without recording purpose, license, and version pin in the PR.
 
