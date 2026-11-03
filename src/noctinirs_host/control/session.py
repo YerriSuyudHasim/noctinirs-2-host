@@ -2,10 +2,12 @@
 
 Rules (issue #24, firmware ADR-0004):
 * Settings are validated locally first; an invalid value sends NO packet.
-* Every command and every state change is appended to `events` and returned to the
-  caller. Nothing is changed silently.
+* Every user command (including local rejections and failures), every state change and
+  every link event is appended to `events`. Successful periodic traffic (heartbeats and
+  status polls) is counted but kept out of the log. Nothing is changed silently.
 * `safe_off` is never blocked by local state and is retried harder than other commands.
-* The controller never sends commands on its own, except heartbeats while streaming.
+* The controller never sends commands on its own. Its only automatic traffic is read-only
+  or keep-alive: heartbeats while streaming and a `status` poll every 2 s otherwise.
 """
 
 from __future__ import annotations
