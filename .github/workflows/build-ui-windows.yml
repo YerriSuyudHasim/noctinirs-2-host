@@ -39,6 +39,14 @@ jobs:
           Get-Content $out
           if ($p.ExitCode -ne 0) { exit 1 }
           if (-not (Select-String -Path $out -Pattern "SELFTEST OK" -Quiet)) { exit 1 }
+      - name: Check the shipped notices and manifest
+        shell: pwsh
+        run: |
+          $n = "dist\NoctiNIRS-Host\THIRD_PARTY_NOTICES.txt"
+          if (-not (Select-String -Path "dist\bundle-manifest.txt" -Pattern "THIRD_PARTY_NOTICES.txt" -Quiet)) { Write-Error "manifest misses the notices file"; exit 1 }
+          if (-not (Select-String -Path $n -Pattern "GNU LESSER GENERAL PUBLIC LICENSE" -Quiet)) { Write-Error "LGPL text missing from notices"; exit 1 }
+          if (Select-String -Path $n -Pattern "valid commercial Qt licenses" -Quiet) { Write-Error "commercial Qt notice must not be in the notices"; exit 1 }
+          Write-Host "notices and manifest OK"
       - name: Publish the build report in the job summary
         shell: pwsh
         run: Get-Content "dist\build-report.md" | Add-Content -Path $env:GITHUB_STEP_SUMMARY

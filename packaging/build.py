@@ -194,9 +194,9 @@ def write_notices(infos: list[dict]) -> pathlib.Path:
     for i in infos:
         lines += ["=" * 72, f"{i['name']} {i['version']}  -  license: {i['license']}", "=" * 72]
         if not i["texts"]:
-            lines.append("(no license file in the package; see the license text above)"
+            lines.append("(no license text from this package is reproduced here; see the LGPL-3.0 and GPL-3.0 texts above)"
                          if i["name"].lower().startswith(("pyside6", "shiboken6"))
-                         else "(no license file found in the package metadata; see the upstream project)")
+                         else "(no license text from this package is reproduced here; see the upstream project)")
         for path, text in i["texts"]:
             lines += [f"--- {path} ---", text.strip(), ""]
         lines.append("")
@@ -279,12 +279,12 @@ def write_report(infos, build_only, zip_path, files, forbidden) -> pathlib.Path:
 
 def main() -> int:
     run_pyinstaller()
+    infos = [dist_info(n) for n in BUNDLED]
+    build_only = [dist_info(n) for n in BUILD_ONLY if _installed(n)]
+    write_notices(infos)  # before listing, so the manifest and sizes include it
     files = list_bundle()
     forbidden = find_forbidden([p for p, _ in files])
     write_manifest(files)
-    infos = [dist_info(n) for n in BUNDLED]
-    build_only = [dist_info(n) for n in BUILD_ONLY if _installed(n)]
-    write_notices(infos)
     zip_path = make_zip()
     report = write_report(infos, build_only, zip_path, files, forbidden)
     print(report.read_text(encoding="utf-8"))
