@@ -1,0 +1,3 @@
+# Files whose exact bytes are pinned by sha256 must never be line-ending converted.
+# On Windows, Git's default would turn LF into CRLF and change the hash.
+config/optical_geometry_v1.json -text
