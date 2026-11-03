@@ -9,7 +9,7 @@ project:
   development_version: "0.0.0"
   architecture: ui-independent-core
   language: Python
-  ui_framework: TBD  # decided by host ADR-0001
+  ui_framework: PySide6  # decided by host ADR-0001 (docs/adr/0001-ui-framework.md)
   related_product: noctinirs-2
 
 repositories:
