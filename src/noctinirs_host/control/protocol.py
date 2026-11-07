@@ -1,10 +1,11 @@
 """REQUEST encode and REPLY decode for the NoctiNIRS 2 control protocol.
 
 Pinned source (do not extend on the host side; raise changes in `noctinirs-2`):
-  firmware repo noctinirs-2 @ cbec2dab8e23595ae4e374e181c0d7c70f25edec
-  docs/adr/0004-host-protocol.md (status Proposed, rev 3.1 file draft)
+  firmware repo noctinirs-2 @ bd880f5890ea1a72d54e8ab9cc2ed55f002d1382
+  docs/adr/0004-host-protocol.md (Proposed, rev 4 + Batch 3 amendment)
   docs/adr/0004-local-implementation.md (concrete reply bodies; 2026-10-27)
-  docs/LED_HOST_CONTROL.md (Fs: any integer 2..10 Hz; INFO advertises fs_min/fs_max)
+  firmware/v4-idf61/main/v4_nn2_control.inc (INFO fs_allowed capability)
+  components/nn2_app/src/nn2_app_comm.c (session and asynchronous states)
   tools/nn2ctl.py (reference client)
 Not verified against a running device. All integers little endian.
 """
@@ -22,7 +23,7 @@ from ..wire.envelope import (
 )
 from ..wire.errors import WireError
 
-FIRMWARE_PIN = "cbec2dab8e23595ae4e374e181c0d7c70f25edec"
+FIRMWARE_PIN = "bd880f5890ea1a72d54e8ab9cc2ed55f002d1382"
 
 OP_HEARTBEAT = 0x0001
 OP_INFO = 0x0002
@@ -35,15 +36,16 @@ OP_SAFE_OFF = 0x0020
 OP_CLEAR_FAULT = 0x0021
 OP_SET_FS = 0x0100
 OP_SET_LED_CURRENT = 0x0101
+OP_SET_MODE = 0x0102  # one byte: 0 ACQ, 1 ENGINEERING; STOPPED only
 
 OPCODE_NAMES = {
     OP_HEARTBEAT: "heartbeat", OP_INFO: "info", OP_STATUS: "status",
     OP_GET_CONFIG: "get_config", OP_GET_TIME: "get_time", OP_START: "start_stream",
     OP_STOP: "stop_stream", OP_SAFE_OFF: "safe_off", OP_CLEAR_FAULT: "clear_fault",
-    OP_SET_FS: "set_fs", OP_SET_LED_CURRENT: "set_led_current",
+    OP_SET_FS: "set_fs", OP_SET_LED_CURRENT: "set_led_current", OP_SET_MODE: "set_mode",
 }
 TIMED_OPS = (OP_HEARTBEAT, OP_STATUS, OP_GET_TIME)  # carry an opaque u64 host timestamp
-MUTATING_OPS = (OP_START, OP_STOP, OP_CLEAR_FAULT, OP_SET_FS, OP_SET_LED_CURRENT)
+MUTATING_OPS = (OP_START, OP_STOP, OP_CLEAR_FAULT, OP_SET_FS, OP_SET_LED_CURRENT, OP_SET_MODE)
 
 STATUS_NAMES = ("OK", "INVALID_STATE", "INVALID_ARG", "UNKNOWN_COMMAND", "HW_FAULT", "BUSY",
                 "BAD_FRAME", "PRECONDITION_FAILED", "RESERVED_FLAGS")

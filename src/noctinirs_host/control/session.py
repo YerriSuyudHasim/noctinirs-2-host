@@ -6,32 +6,40 @@ Rules (issue #24, firmware ADR-0004):
   every link event is appended to `events`. Successful periodic traffic (heartbeats and
   status polls) is counted but kept out of the log. Nothing is changed silently.
 * `safe_off` is never blocked by local state and is retried harder than other commands.
-* The controller never sends commands on its own. Its only automatic traffic is read-only
-  or keep-alive: heartbeats while streaming and a `status` poll every 2 s otherwise.
+* Automatic traffic is read-only or keep-alive: owner heartbeats in active states,
+  status polling during transitions and while idle. START is always explicit.
 """
 
 from __future__ import annotations
 
 import time
+import math
+import secrets
 from dataclasses import dataclass, field
 from typing import Callable, Protocol
 
 from ..wire.envelope import MSG_FRAME, parse_envelope
 from ..wire.errors import WireError
+from ..wire.optical import LAYOUT_RAW, parse_raw
 from .protocol import (
     LED_CHANNELS, LED_MAX_MA, OP_CLEAR_FAULT, OP_GET_CONFIG, OP_GET_TIME, OP_HEARTBEAT, OP_INFO, OP_SAFE_OFF,
-    OP_SET_FS, OP_SET_LED_CURRENT, OP_START, OP_STATUS, OP_STOP, OPCODE_NAMES, ST_STOPPED,
+    OP_SET_FS, OP_SET_LED_CURRENT, OP_SET_MODE, OP_START, OP_STATUS, OP_STOP, ST_STOPPED,
+    ST_STARTING, ST_STOPPING,
     ST_FAULTED, ST_SAFE_OFF, ST_STREAMING, TIMED_OPS, Reply, args_host_time, args_set_fs, args_set_led_current,
     decode_reply, encode_request, state_name,
 )
 
 HEARTBEAT_PERIOD_S = 0.5  # local implementation record
 STATUS_PERIOD_S = 2.0  # host-chosen: keeps the displayed state fresh while not streaming
+TRANSITION_POLL_S = 0.05  # nn2ctl stop confirmation poll cadence
+OWNED_STATES = (ST_STARTING, ST_STREAMING, ST_STOPPING)
 
 
 class Transport(Protocol):
     def send(self, datagram: bytes) -> None: ...
     def receive(self, timeout_s: float) -> list[bytes]: ...
+    def open(self) -> None: ...
+    def close(self) -> None: ...
 
 
 class LoopbackTransport:
@@ -79,6 +87,13 @@ class LoopbackTransport:
             self._pull_frames()
         return [self._queue.pop(0)] if self._queue else []
 
+    def open(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self._queue.clear()
+        self._held = None
+
 
 @dataclass(frozen=True)
 class Event:
@@ -104,11 +119,18 @@ class Settings:
     current_ma: list[int] = field(default_factory=list)
     fs_min: int | None = None
     fs_max: int | None = None
+    fs_allowed: tuple[int, ...] = ()
+    mode: str | None = None
+    current_max_ma: int = LED_MAX_MA
 
 
 class SessionController:
     def __init__(self, transport: Transport, clock: Callable[[], float] = time.monotonic, *,
                  retries: int = 2, timeout_s: float = 0.5) -> None:
+        if not math.isfinite(timeout_s) or timeout_s <= 0:
+            raise ValueError("timeout must be positive and finite")
+        if isinstance(retries, bool) or not isinstance(retries, int) or not 0 <= retries <= 10:
+            raise ValueError("retries must be 0..10")
         self._t = transport
         self._clock = clock
         self.retries, self.timeout_s = retries, timeout_s
@@ -123,8 +145,9 @@ class SessionController:
         self.events: list[Event] = []
         self.listeners: list[Callable[[Event], None]] = []
         self.counters = dict(sent=0, retries=0, timeouts=0, unmatched=0, duplicate_replies=0,
-                             malformed=0, local_rejects=0, frames_routed=0, frames_unrouted=0)
-        self._next_id = 1
+                             malformed=0, local_rejects=0, frames_routed=0, frames_unrouted=0,
+                             wrong_session=0, raw_routed=0, io_errors=0)
+        self._next_id = secrets.randbelow(0x7fffffff) + 1  # reference client watermark strategy
         self._seq = 0
         self._last_hb = 0.0
         self._last_status = 0.0
@@ -133,6 +156,10 @@ class SessionController:
         self._rebooted = False
         # FRAME datagrams go here, untouched; the live-view receiver does the parsing.
         self.frame_sink: Callable[[bytes], object] | None = None
+        # Validated RAW datagrams, unchanged. No recorder or implicit storage.
+        self.raw_sink: Callable[[bytes], object] | None = None
+        self._busy = False
+        self._stop_requested = False
 
     # --- bookkeeping ----------------------------------------------------
     def _log(self, kind: str, text: str) -> None:
@@ -163,8 +190,12 @@ class SessionController:
             self.counters["sent"] += 1
             if attempt:
                 self.counters["retries"] += 1
-            for _ in range(64):  # bounded work under unrelated traffic
-                batch = self._t.receive(self.timeout_s)
+            deadline = time.monotonic() + self.timeout_s
+            for _ in range(64):  # bounded work AND time under unrelated traffic
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                batch = self._t.receive(remaining)
                 if not batch:
                     break
                 for raw in batch:
@@ -179,10 +210,26 @@ class SessionController:
     def _route_frame(self, raw: bytes) -> bool:
         """True if `raw` is a FRAME datagram (consumed here, never mistaken for a reply)."""
         try:
-            is_frame = parse_envelope(raw).msg_type == MSG_FRAME
+            env = parse_envelope(raw)
+            is_frame = env.msg_type == MSG_FRAME
         except WireError:
             return False  # decode_reply counts it as malformed
         if is_frame:
+            # Streams have no req_id/opcode or boot_id. Only the held session on
+            # the same endpoint is eligible (nn2ctl Client.request).
+            if not self.session_id or env.session_id != self.session_id:
+                self.counters["wrong_session"] += 1
+                return True
+            if len(env.payload) >= 2 and env.payload[1] == LAYOUT_RAW:
+                try:
+                    parse_raw(env.payload)
+                except WireError:
+                    self.counters["malformed"] += 1
+                    return True
+                if self.raw_sink is not None:
+                    self.counters["raw_routed"] += 1
+                    self.raw_sink(raw)
+                    return True
             if self.frame_sink is None:
                 self.counters["frames_unrouted"] += 1
             else:
@@ -208,11 +255,27 @@ class SessionController:
                 and reply.t_host_us != int.from_bytes(args, "little"):
             self.counters["unmatched"] += 1
             return None
+        # Session-changing ACKs can return a new ID, an old STOP acceptance
+        # (STOPPING), or zero after teardown. Errors can report another owner's
+        # ID: observe the state, never acquire that ID.
+        if reply.ok and self.session_id and opcode not in (
+                OP_START, OP_STOP, OP_SAFE_OFF, OP_CLEAR_FAULT) \
+                and reply.session_id != self.session_id:
+            self.counters["wrong_session"] += 1
+            return None
+        if reply.ok and opcode == OP_START and not reply.session_id:
+            self.counters["wrong_session"] += 1
+            return None
+        if reply.ok and opcode == OP_STOP and reply.session_id not in (0, self.session_id):
+            self.counters["wrong_session"] += 1
+            return None
+        if reply.ok and opcode in (OP_SAFE_OFF, OP_CLEAR_FAULT) and reply.session_id:
+            self.counters["wrong_session"] += 1
+            return None
         if self.boot_id is not None and reply.boot_id != self.boot_id:
             self._log("link", "device rebooted (boot id changed): reconnect required")
-            self.connected = False
-            self.device_state, self.session_id = None, 0
-            self.boot_id = None
+            self._forget_link()
+            self._t.close()
             self._rebooted = True
             return None
         self.boot_id = reply.boot_id
@@ -223,16 +286,36 @@ class SessionController:
 
     def _run(self, name: str, opcode: int, args: bytes = b"", *, extra_retries: int = 0,
              note: str = "", quiet_ok: bool = False) -> CommandResult:
-        reply = self._request(opcode, args, extra_retries=extra_retries)
+        if self._busy:
+            return self._reject(name, "another transaction is active")
+        self._busy = True
+        try:
+            return self._run_transaction(name, opcode, args, extra_retries=extra_retries,
+                                         note=note, quiet_ok=quiet_ok)
+        finally:
+            self._busy = False
+
+    def _run_transaction(self, name: str, opcode: int, args: bytes, *, extra_retries: int,
+                         note: str, quiet_ok: bool) -> CommandResult:
+        try:
+            reply = self._request(opcode, args, extra_retries=extra_retries)
+        except OSError as exc:
+            self.counters["io_errors"] += 1
+            self._forget_link()
+            self._t.close()
+            self._log("link", f"{name}: transport error ({exc}); reconnect required")
+            self._log("command", f"{name}{note}: IO_ERROR ({exc})")
+            return CommandResult(name, False, True, "IO_ERROR", str(exc))
         if reply is None:
             self._log("command", f"{name}{note}: NO REPLY (timeout)")
             return CommandResult(name, False, True, "TIMEOUT", "no reply from device")
         self._set_state(reply)
         if opcode in (OP_START, OP_STOP, OP_SAFE_OFF, OP_CLEAR_FAULT) and reply.ok:
-            self.session_id = reply.session_id if opcode == OP_START else 0
-        if reply.status == 1 and opcode not in (OP_START, OP_SAFE_OFF):  # INVALID_STATE
-            if opcode in (OP_HEARTBEAT, OP_STOP):
-                self.session_id = 0  # session gone; never adopt another owner's id
+            self.session_id = reply.session_id if opcode in (OP_START, OP_STOP) else 0
+            if reply.state not in OWNED_STATES:
+                self.session_id = 0
+        if reply.status == 1 and reply.session_id != self.session_id:  # INVALID_STATE
+            self.session_id = 0  # session gone; never adopt another owner's id
         if not (quiet_ok and reply.ok):  # periodic traffic stays out of the log unless it fails
             self._log("command", f"{name}{note}: {reply.status_text} (state {reply.state_text})")
         return CommandResult(name, reply.ok, True, reply.status_text,
@@ -245,8 +328,19 @@ class SessionController:
 
     # --- public commands ---------------------------------------------------------
     def connect(self) -> CommandResult:
+        if self._busy:
+            return self._reject("connect", "another transaction is active")
+        if self.connected:
+            return self._reject("connect", "already connected; disconnect first")
+        self._forget_link()
+        try:
+            self._t.open()
+        except OSError as exc:
+            self._t.close()
+            return CommandResult("connect", False, False, "IO_ERROR", str(exc))
         res = self._run("info", OP_INFO)
         if not res.ok:
+            self.disconnect()
             return res
         self.info = res.reply.info
         for key, attr in (("fs_min", "fs_min"), ("fs_max", "fs_max")):
@@ -254,8 +348,23 @@ class SessionController:
                 setattr(self.settings, attr, int(self.info[key]))
             except (KeyError, ValueError):
                 setattr(self.settings, attr, None)
+        try:
+            values = tuple(int(v) for v in self.info["fs_allowed"].split(","))
+            if not values or any(v < 2 or v > 255 for v in values):
+                raise ValueError("invalid Fs capability")
+            self.settings.fs_allowed = tuple(sorted(set(values)))
+        except (KeyError, ValueError):
+            self.settings.fs_allowed = ()  # no range or hard-coded fallback
+        self.settings.mode = self.info.get("mode")
+        try:
+            limit = int(self.info["current_max_ma"])
+            if 0 <= limit <= LED_MAX_MA:
+                self.settings.current_max_ma = limit
+        except (KeyError, ValueError):
+            pass
         cfg = self._run("get_config", OP_GET_CONFIG)
         if not cfg.ok:
+            self.disconnect()
             return cfg
         self.settings.fs_hz = cfg.reply.fs_hz
         self.settings.current_ma = list(cfg.reply.current_ma)
@@ -268,12 +377,30 @@ class SessionController:
         if self.connected:
             self._log("link", "disconnected by user (no command sent; a streaming device "
                               "stops itself after the grace period)")
+        self._forget_link()
+        self._t.close()
+
+    def _forget_link(self) -> None:
         self.connected = False
         self.device_state, self.session_id, self.boot_id = None, 0, None
+        self.settings = Settings()
+        self.info = {}
+        self._stop_requested = False
+
+    close = disconnect
 
     def refresh_status(self, *, quiet: bool = False) -> CommandResult:
-        return self._run("status", OP_STATUS, args_host_time(int(self._clock() * 1e6)),
-                         quiet_ok=quiet)
+        res = self._run("status", OP_STATUS, args_host_time(int(self._clock() * 1e6)),
+                        quiet_ok=quiet)
+        self._observe_end(res)
+        return res
+
+    def _observe_end(self, res: CommandResult) -> None:
+        if res.reply and self.device_state not in OWNED_STATES:
+            self.session_id = 0
+            if self._stop_requested and self.device_state == ST_STOPPED:
+                self.last_end = "HOST_STOP"
+            self._stop_requested = False
 
     def get_time(self) -> CommandResult:
         return self._run("get_time", OP_GET_TIME, args_host_time(int(self._clock() * 1e6)))
@@ -287,15 +414,18 @@ class SessionController:
         if res.ok:
             self._last_hb = self._clock()
             self.last_end = None
+            self._stop_requested = False
         return res
 
     def stop(self) -> CommandResult:
         if not self.connected:
             return self._reject("stop_stream", "not connected")
-        if self.device_state != ST_STREAMING:
-            return self._reject("stop_stream", f"state is {self.state_text}, not STREAMING")
+        if not self.session_id or self.device_state not in OWNED_STATES:
+            return self._reject("stop_stream", "no owned active session")
         res = self._run("stop_stream", OP_STOP)
         if res.ok:
+            self._stop_requested = self.device_state == ST_STOPPING
+        if res.ok and self.device_state == ST_STOPPED:
             self.last_end = "HOST_STOP"
         return res
 
@@ -304,6 +434,7 @@ class SessionController:
         res = self._run("safe_off", OP_SAFE_OFF, extra_retries=3)
         if res.ok:
             self.last_end = "SAFE_OFF"
+            self._stop_requested = False
         return res
 
     def clear_fault(self) -> CommandResult:
@@ -316,11 +447,11 @@ class SessionController:
     def set_fs(self, fs_hz: int) -> CommandResult:
         if not self.connected:
             return self._reject("set_fs", "not connected")
-        lo, hi = self.settings.fs_min, self.settings.fs_max
-        if lo is None or hi is None:
-            return self._reject("set_fs", "device did not report its Fs limits (INFO fs_min/fs_max)")
-        if isinstance(fs_hz, bool) or not isinstance(fs_hz, int) or not lo <= fs_hz <= hi:
-            return self._reject("set_fs", f"Fs must be an integer {lo}..{hi} Hz")
+        allowed = self.settings.fs_allowed
+        if not allowed:
+            return self._reject("set_fs", "device did not report a valid INFO fs_allowed")
+        if isinstance(fs_hz, bool) or not isinstance(fs_hz, int) or fs_hz not in allowed:
+            return self._reject("set_fs", f"Fs must be one of {allowed} Hz")
         if self.device_state != ST_STOPPED:
             return self._reject("set_fs", f"only allowed while STOPPED (state is {self.state_text})")
         old = self.settings.fs_hz
@@ -329,14 +460,24 @@ class SessionController:
             self.settings.fs_hz = fs_hz
         return res
 
+    def set_mode(self, mode: str) -> CommandResult:
+        if not self.connected or self.device_state != ST_STOPPED:
+            return self._reject("set_mode", "requires a connected STOPPED device")
+        if mode not in ("ACQ", "ENGINEERING"):
+            return self._reject("set_mode", "mode must be ACQ or ENGINEERING")
+        res = self._run("set_mode", OP_SET_MODE, bytes([mode == "ENGINEERING"]))
+        if res.ok:
+            self.settings.mode = mode
+        return res
+
     def set_led_current(self, channel: int, current_ma: int) -> CommandResult:
         if not self.connected:
             return self._reject("set_led_current", "not connected")
         ok_int = lambda v: isinstance(v, int) and not isinstance(v, bool)  # noqa: E731
         if not ok_int(channel) or not 0 <= channel < LED_CHANNELS:
             return self._reject("set_led_current", f"channel must be 0..{LED_CHANNELS - 1}")
-        if not ok_int(current_ma) or not 0 <= current_ma <= LED_MAX_MA:
-            return self._reject("set_led_current", f"current must be 0..{LED_MAX_MA} mA")
+        if not ok_int(current_ma) or not 0 <= current_ma <= self.settings.current_max_ma:
+            return self._reject("set_led_current", f"current must be 0..{self.settings.current_max_ma} mA")
         if self.device_state != ST_STOPPED:
             return self._reject("set_led_current",
                                 f"only allowed while STOPPED (state is {self.state_text})")
@@ -349,13 +490,27 @@ class SessionController:
 
     def pump(self) -> None:
         """Hand pending FRAME datagrams to the sink. Replies seen here are late/duplicates."""
-        for _ in range(256):  # bounded work per call
-            batch = self._t.receive(0.0)
-            if not batch:
-                return
-            for raw in batch:
-                if not self._route_frame(raw):
-                    self.counters["unmatched"] += 1
+        if self._busy or not self.connected:
+            return
+        try:
+            for _ in range(256):  # bounded work per call
+                batch = self._t.receive(0.0)
+                if not batch:
+                    return
+                for raw in batch:
+                    if not self._route_frame(raw):
+                        try:
+                            reply = decode_reply(raw)
+                        except WireError:
+                            self.counters["malformed"] += 1
+                            continue
+                        key = "duplicate_replies" if reply.req_id in self._done else "unmatched"
+                        self.counters[key] += 1
+        except OSError as exc:
+            self.counters["io_errors"] += 1
+            self._forget_link()
+            self._t.close()
+            self._log("link", f"receive: transport error ({exc}); reconnect required")
 
     # --- periodic work ---------------------------------------------------------------
     def tick(self) -> None:
@@ -363,17 +518,27 @@ class SessionController:
         if not self.connected:
             return
         self.pump()
+        if not self.connected:
+            return
         now = self._clock()
-        if self.device_state != ST_STREAMING:
-            if now - self._last_status >= STATUS_PERIOD_S:
+        if self.session_id and self.device_state in OWNED_STATES:
+            if now - self._last_hb >= HEARTBEAT_PERIOD_S:
+                self._last_hb = now
+                res = self._run("heartbeat", OP_HEARTBEAT, args_host_time(int(now * 1e6)),
+                                quiet_ok=True)
+                if res.reply and self.device_state not in OWNED_STATES:
+                    self.session_id = 0
+                    self.last_end = "HOST_STOP" if self._stop_requested and \
+                        self.device_state == ST_STOPPED else "LINK_LOSS (device stopped the stream)"
+                    self._stop_requested = False
+                    self._log("link", "device is no longer streaming: " + self.last_end)
+        if not self.connected:
+            return
+        if self.device_state != ST_STREAMING or not self.session_id:
+            period = TRANSITION_POLL_S if self.device_state in (ST_STARTING, ST_STOPPING) \
+                else STATUS_PERIOD_S
+            if now - self._last_status >= period:
                 self._last_status = now
-                self.refresh_status(quiet=True)
-            return
-        if now - self._last_hb < HEARTBEAT_PERIOD_S:
-            return
-        self._last_hb = now
-        res = self._run("heartbeat", OP_HEARTBEAT, args_host_time(int(now * 1e6)),
-                        quiet_ok=True)
-        if res.sent and not res.ok and self.device_state != ST_STREAMING:
-            self.last_end = "LINK_LOSS (device stopped the stream)"
-            self._log("link", "device is no longer streaming: " + self.last_end)
+                res = self.refresh_status(quiet=True)
+                if res.reply and self.device_state not in OWNED_STATES:
+                    self.session_id = 0

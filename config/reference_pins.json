@@ -53,5 +53,24 @@
       "sha256": "ddc2a094273e447128d0d99ffacb3c2b48b62a89452956b257d592adb42a3c23",
       "note": "old draft geometry, no longer used by the host"
     }
+  },
+  "control_profile": {
+    "firmware_commit": "bd880f5890ea1a72d54e8ab9cc2ed55f002d1382",
+    "image": "firmware/v4-idf61",
+    "protocol": "ADR0004/1",
+    "document_revision": "ADR-0004 Proposed file rev 4 plus Batch 3 one-byte SET_MODE amendment",
+    "source": "Owner-approved offline target; not a claim about remote freshness or installed hardware",
+    "files": {
+      "components/nn2_app/include/nn2_app_comm.h": "5fe573e73cefc7af240b7a756e052240ec033c97d62697dc49e59c402c32ef1c",
+      "components/nn2_app/src/nn2_app_comm.c": "5662ddcd50d8fc06bf9cc3e8205d299e6d7a84f42a065eb7f439178435a4ea32",
+      "components/nn2_core/include/nn2_core_protocol.h": "57e6000b2492613a216c0c498540ddc5ab491822c454751de374c0e3279091a6",
+      "components/nn2_core/src/nn2_core_protocol.c": "08a7537347b5152ce806d450a5b3313707c6bdf28984247ca473b88b39e8521c",
+      "components/nn2_net/nn2_net.c": "228ef463e5aae455c5ad8332e9da5cfa8059024a4160aabb73a2541b5538f36e",
+      "docs/adr/0004-host-protocol.md": "b0373088f4c8ab53915a696f565d6d2e69f262a37d86ff745e037a6dd3058d96",
+      "docs/adr/0004-local-implementation.md": "40a59504af44fe9f93e3375893b1bc97926a12689f6a4e8bd0f0c9fcdb7f929b",
+      "docs/BATCH3_RAW_ENGINEERING.md": "a04b86e490d5636c33cb57d2d1e9fd14d4efaf23aa4115abb5c09166b2b5b6a7",
+      "firmware/v4-idf61/main/v4_nn2_control.inc": "d1df4491b16d655fd870e7be729347ef5a14583fc85fca9d4b7bd69e0d55422b",
+      "tools/nn2ctl.py": "e79d02cb5be87b23e414b756e6edd9e8ad0f087b7f1c33b1e6bdebe0fdc91e44"
+    }
   }
 }

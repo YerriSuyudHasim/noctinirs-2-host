@@ -20,15 +20,16 @@ from ..wire import optical as opt
 from ..wire.envelope import PROTOCOL_VERSION
 from ..wire.errors import WireError
 from .protocol import (
-    FIRMWARE_PIN, LED_CHANNELS, LED_MAX_MA, MUTATING_OPS, OP_CLEAR_FAULT, OP_GET_CONFIG,
+    LED_CHANNELS, LED_MAX_MA, MUTATING_OPS, OP_CLEAR_FAULT, OP_GET_CONFIG,
     OP_GET_TIME, OP_HEARTBEAT, OP_INFO, OP_SAFE_OFF, OP_SET_FS, OP_SET_LED_CURRENT, OP_START,
-    OP_STATUS, OP_STOP, ST_FAULTED, ST_SAFE_OFF, ST_STOPPED, ST_STREAMING, STATUS_BAD_FRAME,
+    OP_STATUS, OP_STOP, OP_SET_MODE, ST_FAULTED, ST_SAFE_OFF, ST_STOPPED, ST_STREAMING, STATUS_BAD_FRAME,
     STATUS_INVALID_ARG, STATUS_INVALID_STATE, STATUS_OK, STATUS_PRECONDITION_FAILED,
     STATUS_RESERVED_FLAGS, STATUS_UNKNOWN_COMMAND, TIMED_OPS, decode_request, encode_frame,
     encode_reply,
 )
 
-FS_MIN, FS_MAX = 2, 10  # docs/LED_HOST_CONTROL.md (integer Hz)
+FIRMWARE_PIN = "cbec2dab8e23595ae4e374e181c0d7c70f25edec"  # historical synthetic model
+FS_MIN, FS_MAX = 2, 10  # historical model, NOT the active v4-idf61 rate set
 DEFAULT_FS, DEFAULT_MA = 5, 30  # ADR-0005
 SILENCE_S = 1.5  # owner silence before grace starts (local implementation record)
 GRACE_S = 3.0  # grace before the simulated stream is ended
@@ -54,6 +55,7 @@ class DeviceSimulator:
         self.state = ST_STOPPED
         self.fault = 0
         self.fs_hz = DEFAULT_FS
+        self.mode = "ACQ"
         self.current_ma = [DEFAULT_MA] * LED_CHANNELS
         self.session_id = 0
         self._next_session = 1
@@ -145,7 +147,7 @@ class DeviceSimulator:
         per call; a long stall is caught up on the next calls, never skipped."""
         self.poll()
         out: list[bytes] = []
-        if self.state != ST_STREAMING:
+        if self.state != ST_STREAMING or self.mode != "ACQ":
             return out
         now = self._clock()
         period = 1.0 / self.fs_hz
@@ -193,7 +195,8 @@ class DeviceSimulator:
             # fs_max from LED_HOST_CONTROL.md) plus a `sim_model` tag. The firmware INFO text
             # has more fields (for example short_policy and i2c) that this model omits.
             text = (f"frames=unsupported;capture=unsupported;duration=HOST;limit_s=0;single_run=0;"
-                    f"fs_min={FS_MIN};fs_max={FS_MAX};sim_model={FIRMWARE_PIN[:7]}")
+                    f"fs_min={FS_MIN};fs_max={FS_MAX};fs_allowed=2,3,4,5,6,7,8,9,10;"
+                    f"mode={self.mode};sim_model={FIRMWARE_PIN[:7]}")
             return self._reply(rid, op, STATUS_OK, text.encode("ascii")), False
         if op == OP_GET_CONFIG:
             ext = struct.pack("<BB20H", self.fs_hz, LED_CHANNELS, *self.current_ma)
@@ -244,6 +247,14 @@ class DeviceSimulator:
             if self.state != ST_STOPPED:
                 return self._reply(rid, op, STATUS_INVALID_STATE), True
             self.fs_hz = args[0]
+            return self._reply(rid, op, STATUS_OK), True
+        if op == OP_SET_MODE:
+            if len(args) != 1 or args[0] not in (0, 1):
+                return self._reply(rid, op, STATUS_INVALID_ARG), True
+            if self.state != ST_STOPPED:
+                return self._reply(rid, op, STATUS_INVALID_STATE), True
+            # MODEL CHOICE: no buffer allocation or RAW producer in this simulator.
+            self.mode = "ENGINEERING" if args[0] else "ACQ"
             return self._reply(rid, op, STATUS_OK), True
         if op == OP_SET_LED_CURRENT:
             if len(args) != 3:

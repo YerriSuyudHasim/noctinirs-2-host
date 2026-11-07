@@ -26,6 +26,40 @@ python -m noctinirs_host check-geometry config\optical_geometry_v1.json
 
 `config/optical_geometry_v1.json` is a byte-identical copy of the official firmware file `config/optical_geometry_v1.json` (sha256 `035c00f1...39ff`, pinned in `config/reference_pins.json`). Its status is still DRAFT until the Owner has checked the distances with calipers. The older draft geometry (`ddc2a094...`) is not used anymore.
 
+## Offline stage B: core UDP/session API
+
+The core now supports an explicit IPv4 UDP endpoint (port 3333 by default).
+Wi-Fi connection is manual. The desktop still uses only the synthetic simulator;
+real-device UI integration is outside this change. Control targets firmware
+`bd880f5890ea1a72d54e8ab9cc2ed55f002d1382`, `firmware/v4-idf61`, separately from the
+unchanged optical/golden pins. See [local review notes](docs/local-review/pr-b/status.md).
+
+API outline below uses a **localhost fake peer**, not a device. Do not execute
+against hardware without a separately approved bench procedure.
+
+```python
+from noctinirs_host.control.session import SessionController
+from noctinirs_host.control.udp import UDPTransport
+
+controller = SessionController(UDPTransport("127.0.0.1", 3333))
+try:
+    result = controller.connect()  # INFO/GET_CONFIG only; never starts a scan
+    if result.ok:
+        allowed = controller.settings.fs_allowed  # actual INFO list, no range fallback
+        result = controller.set_mode("ENGINEERING")  # STOPPED only
+        # START is a separate explicit controller.start() call.
+        # Schedule controller.tick() regularly to receive streams, poll state
+        # and send owner heartbeats. STARTING/STOPPING ACKs are not completion.
+        # controller.raw_sink = callable_accepting_original_datagram_bytes
+finally:
+    controller.disconnect()  # closes socket; no implicit START or STOP
+```
+
+Keep commands/tick on one calling thread. Missing or invalid `fs_allowed` disables
+Fs changes; 1 Hz is rejected. RAW reception is ENGINEERING-only data handling,
+without storage or science interpretation. OPT2 remains simulator/replay support;
+no active firmware OPT2 producer is claimed. Tests use fake peers on loopback.
+
 ## Desktop UI spike (S0, issue #22)
 
 The UI is a separate package, `noctinirs_host_ui`, built with PySide6 and pyqtgraph (decision: [ADR-0001](docs/adr/0001-ui-framework.md)). The core never imports it. The `ui` dependency group needs **Python 3.12 or newer** (exact pins are in `pyproject.toml`).
