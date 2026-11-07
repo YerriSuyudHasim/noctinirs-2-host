@@ -75,3 +75,66 @@ PR-A recorder `PermissionError` and B residuals N1–N7 remain open.
 | `exact-full.log` | `c88dad91b22ce46ec1f34e8e7867c3495b306f4e1593738e5f75dabf5e2aa373` |
 | `exact-full.xml` | `5b4f2e0a0d0f53c20c3b47070d2dbd9365c6988bc39ba5b24b03a71eb695dcf9` |
 | `static.log` | `a985ecf6159c558af0c9437161694c9bfcc91a37dae3d78841806fc21773341e` |
+
+## C-N1 follow-up author evidence
+
+The original review covers code/test SHA `eb890b93c17fb6af04b03d641bc92e0806c34e1e`.
+The fixed candidate is `9406521d018ea71e60180b851e39a19c252908ef`, based on
+notes HEAD `9b558d5045f529b5da26b9fea9e3311029e57d79`. These are Codex author
+runs. Independent re-review is pending. The original evidence table above
+continues to describe the original Stage C candidate.
+
+Windows 11 x64 build 26300, existing `.venv`, Python 3.13.5 and pytest 9.2.0.
+All four local golden files matched their configured SHA-256 pins. Evidence
+is in `../pr-c-evidence/c-n1/` from the clone root. `environment.json` records
+the versions and hashes. `before-head.txt` records that the production source
+matched the reviewed SHA when running the new reproduction. `exact-head.txt`
+records the fix SHA, UTC times and the two preexisting unstaged documentation
+changes at the start of the exact-code runs.
+
+PowerShell from the clone root used `$out='../pr-c-evidence/c-n1'` for logs
+and JUnit XML. The regression and full runs set
+`NN2_GOLDEN_DIR` to the resolved `../pr-a-evidence/golden` path and
+`QT_QPA_PLATFORM` to `offscreen`.
+
+| Run | Arguments after `./.venv/Scripts/python.exe -m pytest` | Result |
+| --- | --- | --- |
+| Reproduction before the fix | `tests/test_raw_recording.py::test_active_metadata_keeps_one_packet_accounting_cut -q --junitxml="$out/before.xml"` | 1 failed, exit 1. The paused live snapshot contained 1 observed, 1 enqueued and 2 persisted. |
+| Same reproduction with the fix in the working tree | `tests/test_raw_recording.py::test_active_metadata_keeps_one_packet_accounting_cut -q --junitxml="$out/after-repro.xml"` | 1 passed, exit 0. Active 1/1/1 and clean-close 2/2/2. |
+| Focused working tree | `tests/test_raw_recording.py tests/test_record_resilience.py -q -rs --junitxml="$out/targeted.xml"` | 57 passed, exit 0. |
+| Exact fix SHA, regression | `tests/test_raw_recording.py tests/test_raw.py tests/test_record.py tests/test_record_resilience.py tests/test_record_uint32.py tests/test_udp_session.py tests/test_golden.py -q -rs --junitxml="$out/regression.xml"` | 316 passed, 0 skipped, exit 0. |
+| Exact fix SHA, full suite | `-q -rs --junitxml="$out/exact-full.xml"` | **560 passed, 3 skipped**, exit 0. |
+
+The regression ran the RAW byte-exact capture/replay and continuity checks,
+the failure and timeout accounting tests, 104 OPT2 recorder/replay cases,
+79 UDP/session cases, and all 90 local golden cases. Tests use synthetic
+data, injected disk behavior and socket loopback. `git diff --check
+9b558d5045f529b5da26b9fea9e3311029e57d79 HEAD` and
+`./.venv/Scripts/python.exe -m compileall -q src tests` returned 0. The full
+suite skipped collection of `tests/ui/test_control_panel.py`,
+`tests/ui/test_live_view.py` and `tests/ui/test_main_window.py` because PySide6
+is absent.
+
+**NOT RUN:** Python 3.12.7, Qt UI and packaging checks, other OSes, firmware C,
+online CI, device/bench, HIL, field, physical power-loss tests and independent
+re-review runs. The PR-A recorder `PermissionError` remains unresolved.
+No other residual was addressed by this fix.
+
+| C-N1 artifact | SHA-256 |
+| --- | --- |
+| `before-head.txt` | `4ae7ba45b5109c9f9504cbf6c702ae4a06c1b191ccdc96fe47cc2e9e16d945d5` |
+| `repro-test.diff` | `11ca9ac67e177ded3723d94d154b5c78dcebb42209e9084fb44667269d941655` |
+| `before.log` | `074956e20f9bb610578092b2b73b7e94ecb15bf22a3243e937f2b551ca993cf5` |
+| `before.xml` | `b8977aff874090828d77606e426d87eafaca77fcf9cbadbb37606f956a9d92a7` |
+| `after-repro.log` | `023471b8bec00a76a9977e27f760f63f1335def4250e63adb75ca7deec3987fb` |
+| `after-repro.xml` | `f73a250f123819db085dcae6569a3fefa936561d8ea756f0a1dc19a9f92377a5` |
+| `targeted.log` | `31aa3eb8064004bd31823f768013c7fa251c3cf7c1d53f5439f86dbff115ccaa` |
+| `targeted.xml` | `9f739d98b46784cbc10f6db44810a26bc1923f21d905c304ca9592903ebf3424` |
+| `exact-head.txt` | `c2041546d7e3c0d6770e0ebf7573ca70c764b7c7a0fe979a09ff6cd71511a89c` |
+| `environment.json` | `0ba7a6887f9fe2c39186febf5f3f424d8ff0f79df79b5d3ec37b687dd2487657` |
+| `regression.log` | `e81639b2864676ddfba508428ebfb4778d42dca7fe36f92ced1c98d92dbbba77` |
+| `regression.xml` | `a1ee0c6d8eaeee7458dd76842b190d1ca0a0dde4e85d45f69982069a3fd85504` |
+| `exact-full.log` | `152399bef8f5bca5595b7ed932f4ce6578f06276f942fbfe378ac3df83ffd5fe` |
+| `exact-full.xml` | `2ea8f066875d0c997ae0019ff77b7d1ceb73c22782cf526c09acfd2daf085bb6` |
+| `static.log` | `327b84ae4180404be961cf94c4f689274a72113952ba33b4e520cf6045f13a42` |
+| `fix.diff` | `dea7185fe97d3665e7b4d92f1b00845942e97963189fe87cddfd583665f9f53d` |
