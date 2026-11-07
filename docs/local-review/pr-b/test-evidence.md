@@ -108,3 +108,49 @@ independent attestation. Hashes anchor the copies supplied for this local handof
 `checks-fe4c4f0.json` preserves command argv, exit status and stdout/stderr.
 The environment differs from repository CI Python 3.12.7 as disclosed above.
 No UI packaging checks, online CI or hardware checks were run.
+
+## IR B1 regression evidence
+
+Reviewed code `fe4c4f003e3ed01028eaab02ce651cb3b8f14969`. Reproduction ran
+with the new test assertions on that implementation and preserved the four
+original failures. The fix was verified on clean code/test commit
+`7738593b3ea6e15d82d417b3954e1b6c24756ee4`. Environment was Windows 11 x64,
+Python 3.13.5 and pytest 9.2.0. The exact environment, static command output and
+firmware hash checks are in `../pr-b-evidence/ir-b1/checks-7738593.json`.
+
+Commands from the clone root used the existing venv and local golden fixtures.
+Each pytest invocation saved stdout and stderr to a matching `.log` file.
+
+```powershell
+./.venv/Scripts/python.exe -m pytest -q -rs tests/test_udp_session.py -k 'send_backpressure or transaction_deadline' --junitxml=../pr-b-evidence/ir-b1/reproduction.xml
+./.venv/Scripts/python.exe -m pytest -q -rs tests/test_udp_session.py -k 'send_backpressure or transaction_deadline' --junitxml=../pr-b-evidence/ir-b1/fixed-working-tree.xml
+$env:NN2_GOLDEN_DIR=(Resolve-Path '../pr-a-evidence/golden').Path
+$env:QT_QPA_PLATFORM='offscreen'
+./.venv/Scripts/python.exe -m pytest -q -rs tests/test_udp_session.py tests/test_control.py --junitxml=../pr-b-evidence/ir-b1/focused-7738593.xml
+./.venv/Scripts/python.exe -m pytest -q -rs --junitxml=../pr-b-evidence/ir-b1/full-7738593.xml
+git diff --check fe4c4f003e3ed01028eaab02ce651cb3b8f14969 HEAD
+./.venv/Scripts/python.exe -m compileall -q src tests
+```
+
+| Check | Result |
+| --- | --- |
+| Reproduction on prior code with new assertions | 4 failed, 74 deselected, exit 1 |
+| Fixed working tree, same selection | 4 passed, 74 deselected |
+| Focused on `7738593` | 134 passed, 1.09 s |
+| Full suite on `7738593` | 531 passed, 3 skipped, 16.88 s, exit 0 |
+| Static checks and local firmware-source hash comparison | Passed. All 10 source hashes matched |
+
+The three skips were `tests/ui/test_control_panel.py`, `test_live_view.py` and
+`test_main_window.py` at collection due to missing PySide6. The full suite
+included golden and recorder/replay regressions. The PR-A PermissionError did
+not recur in this run. Socket-double checks exercise send backpressure directly
+with a mode-sensitive `sendto`. Tests used synthetic peers. Hardware timing,
+Python 3.12.7, UI/build checks and online CI were outside this run.
+
+| File under `../pr-b-evidence/ir-b1/` | SHA-256 |
+| --- | --- |
+| `reproduction.log` | `d5c34c22c866aeedadc717f6f9dd9dae295609441ed1a78c5ba950c45d68508e` |
+| `reproduction.xml` | `4c9b66803aff62c51ef34ab6b3f741dd4d28eb9fd1192247a696abfd6ecced39` |
+| `focused-7738593.xml` | `d4bd62ce903b6fe0ea1690073bb1f8d1882bd908c40622c6a15b245448c7de48` |
+| `full-7738593.xml` | `90677f4ea2473eb19f6fefee668b33793c42808d23b1933895cd073a7b4f807c` |
+| `checks-7738593.json` | `bfed1bf68382fdd23bc2cfbfd5a747238c23385a2d5eed202b2df39e8384e49e` |

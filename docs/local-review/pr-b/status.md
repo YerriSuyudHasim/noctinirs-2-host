@@ -4,15 +4,15 @@ Author: Codex / GPT-6, session `codex-pr-b-offline-20261107`, host implementatio
 developer, directly assigned by the Owner in this conversation. Author tests are
 not independent AGENT06 verification or AGENT07 review.
 
-Status: **READY FOR LOCAL INDEPENDENT REVIEW**. Review verdict: **PENDING**.
-Exact code/test commit: `fe4c4f003e3ed01028eaab02ce651cb3b8f14969`.
-A subsequent notes-only commit records final evidence and the review handoff; it
-does not change code or tests. No integration approval.
+**IR B1 awaiting AGENT07 re-review.** The reviewer raised B1 on
+`fe4c4f003e3ed01028eaab02ce651cb3b8f14969`. The author fix and regression tests
+are in `7738593b3ea6e15d82d417b3954e1b6c24756ee4`. A separate documentation
+commit records the finding, response and evidence.
 
-Final author full suite: **528 passed, 3 UI collection skips**, 16.84 s, on the
-exact code commit. Golden: 90 passed; recorder/replay: 104 passed; UDP: 75 passed.
-Static checks passed; 10/10 control source hashes match local pinned Git objects.
-See test-evidence.md for limitations and original failure history.
+The author full suite on the fix reported **531 passed and 3 UI collection
+skips** in 16.88 s. Static checks passed and all ten control source hashes matched
+the local pinned Git objects. See test-evidence.md for limitations and the
+original failure history.
 
 ## Baseline
 
