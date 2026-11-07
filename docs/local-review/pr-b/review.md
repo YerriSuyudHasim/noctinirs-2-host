@@ -1,7 +1,10 @@
 # Independent local review record
 
 Verdict: **PENDING**. Reviewer: **unassigned here; AGENT07 expected**.
-Candidate exact implementation SHA: to be recorded after the local code commit.
+Candidate exact implementation SHA: `fe4c4f003e3ed01028eaab02ce651cb3b8f14969`.
+Final evidence/handoff are in a later notes-only commit; review that documentation
+separately and record its SHA if included in review scope. No code changed after
+the implementation commit. No independent review has yet taken place.
 This file was prepared by the implementation author, not by AGENT07.
 No approval, review completion or independent verification is asserted.
 

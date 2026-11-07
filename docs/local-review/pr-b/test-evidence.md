@@ -60,3 +60,51 @@ Existing workflows were read as check definitions, never executed online.
 PR-A's PermissionError remains unresolved/nonblocking. It did not recur in the
 precommit full run. Recorder source and tests remain untouched; any recurrence
 must keep its original traceback and lifecycle context in a new log entry.
+
+
+## Final exact-commit author checks
+
+Code/test SHA: `fe4c4f003e3ed01028eaab02ce651cb3b8f14969`. Recorded UTC and package list are in
+`checks-fe4c4f0.json`; exact HEAD is also in `exact-head.txt`. Working tree was
+clean when this run started. Later changes are documentation-only.
+
+PowerShell commands from the clone root (no download or remote command):
+
+```powershell
+$env:NN2_GOLDEN_DIR=(Resolve-Path '../pr-a-evidence/golden').Path
+$env:QT_QPA_PLATFORM='offscreen'
+git rev-parse HEAD
+./.venv/Scripts/python.exe -m pytest -q -rs --junitxml=../pr-b-evidence/full-fe4c4f0.xml 2>&1 | Tee-Object -FilePath ../pr-b-evidence/full-fe4c4f0.log
+git diff --check d90e00db1f51c05ad2309fd77547a560450cb91a HEAD
+./.venv/Scripts/python.exe -m compileall -q src tests
+./.venv/Scripts/python.exe -m noctinirs_host check-geometry config/optical_geometry_v1.json
+```
+
+Results: full suite **528 passed, 3 skipped, 0 failed/errors**, 16.84 s, exit 0.
+JUnit contains 90 golden cases, 104 recorder/replay cases (59 record + 29
+resilience + 16 uint32) and 75 new UDP cases, all passed. All golden fixtures
+were available, hash-checked and run; none was skipped. The three UI collection
+skips remain exactly the missing-PySide6 modules listed above. Individual UI
+cases behind those modules were NOT RUN. The residual PR-A PermissionError did
+not recur in either full run; it remains unresolved, not declared fixed.
+
+All three static commands exited 0. Geometry validation retains the existing
+`draft_pending_caliper` warning; it does not validate physical distances.
+Using only local `git show <firmware-SHA>:<path>`, all 10 control-profile source
+SHA-256 values matched `config/reference_pins.json.control_profile.files`.
+No recorder source/test, golden fixture or geometry byte changed against base.
+
+Raw evidence is local, provisional review material, not a remote CI artifact or
+independent attestation. Hashes anchor the copies supplied for this local handoff:
+
+| File under sibling `pr-b-evidence/` | SHA-256 |
+| --- | --- |
+| `full-fe4c4f0.log` | `1dfeac3a9f3dedc3da556f6b2764e3e211c910006618d490c0b212c9e659d245` |
+| `full-fe4c4f0.xml` | `bf83f6f4e41724ec24be515ce1d4dfcb56a4db88a5cc8f4140b4e07ba7e9cabb` |
+| `checks-fe4c4f0.json` | `69d53c9767cd9af1d8cfd8f4434801acdf13b1657d9220ccacd240757d7d85c4` |
+| `environment-precommit.json` | `8b3f83fe16274feba3fa7af2fd80ba3e7fe6970865a72b4edd04b49d8af50316` |
+| `udp-first.log` | `76258592306931a85ffe21206563d9571c9c8b2303a388b1d4f5e4e77d04885d` |
+
+`checks-fe4c4f0.json` preserves command argv, exit status and stdout/stderr.
+The environment differs from repository CI Python 3.12.7 as disclosed above.
+No UI packaging checks, online CI or hardware checks were run.

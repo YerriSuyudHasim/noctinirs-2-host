@@ -2,10 +2,14 @@
 
 From: Codex / GPT-6, session `codex-pr-b-offline-20261107`, implementation author.
 To: independently assigned non-author AGENT07 in a separate review workspace.
-Status: preparing exact-commit evidence. No merge or integration authorization.
+Status: **READY FOR LOCAL INDEPENDENT REVIEW**. No merge/integration authorization.
 Offline base: `d90e00db1f51c05ad2309fd77547a560450cb91a`.
-Candidate implementation SHA: pending local commit. Later notes-only SHA will be
-reported separately; author tests are tied to the implementation SHA.
+Candidate implementation SHA: `fe4c4f003e3ed01028eaab02ce651cb3b8f14969`.
+Final full suite: 528 passed, 3 UI collection skips; 10/10 control-source hashes
+match; static checks pass. Author tests are tied to this implementation SHA.
+The following notes-only commit updates the review records with evidence/review
+status, leaving the code/test tree unchanged. Its SHA is reported separately by
+the author; inspect `git log -2 --oneline` locally.
 
 ## Review procedure (entirely offline)
 

@@ -5,7 +5,7 @@ Independent review has not occurred. No reviewer finding is closed or approved
 by this author. Future entries must cite the review finding ID and exact fix SHA,
 changed files and test evidence; keep reviewer observations in review.md.
 
-## AUTHOR-001 — Windows oversize receive exception
+## AUTHOR-001 â€” Windows oversize receive exception
 
 Source: author socket-loopback run, not an independent reviewer finding.
 Initial result: 1 failed / 59 passed, retained in `../pr-b-evidence/udp-first.log`.
@@ -26,3 +26,11 @@ test references are appended to test-evidence.md after committing.
 The recorder PermissionError is unresolved/nonblocking per Owner direction.
 No proposed fix, hidden skip, delay or changed recorder assertion is included.
 This is a carried limitation, not an author claim to have resolved a finding.
+
+## Final author evidence attachment
+
+AUTHOR-001 correction is included in `fe4c4f003e3ed01028eaab02ce651cb3b8f14969`.
+The exact-commit full run passed 528 tests (including all 75 UDP tests); three
+UI modules were skipped for missing PySide6. The failure log remains preserved,
+with SHA-256 in test-evidence.md. No independent finding has been received.
+No code/test change followed this candidate; any future fix requires re-review.

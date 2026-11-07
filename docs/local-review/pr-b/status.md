@@ -4,8 +4,15 @@ Author: Codex / GPT-6, session `codex-pr-b-offline-20261107`, host implementatio
 developer, directly assigned by the Owner in this conversation. Author tests are
 not independent AGENT06 verification or AGENT07 review.
 
-Status: implementation complete; exact-commit evidence and local review handoff
-are being prepared. Review verdict: **PENDING**. No integration approval.
+Status: **READY FOR LOCAL INDEPENDENT REVIEW**. Review verdict: **PENDING**.
+Exact code/test commit: `fe4c4f003e3ed01028eaab02ce651cb3b8f14969`.
+A subsequent notes-only commit records final evidence and the review handoff; it
+does not change code or tests. No integration approval.
+
+Final author full suite: **528 passed, 3 UI collection skips**, 16.84 s, on the
+exact code commit. Golden: 90 passed; recorder/replay: 104 passed; UDP: 75 passed.
+Static checks passed; 10/10 control source hashes match local pinned Git objects.
+See test-evidence.md for limitations and original failure history.
 
 ## Baseline
 
