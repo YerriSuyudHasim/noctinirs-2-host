@@ -383,12 +383,12 @@ def test_timeout_is_bounded_and_late_start_cannot_acquire_lease(rig):
     assert ctl.session_id == 0 and peer.executed_starts == 1
     for raw, source in held:
         peer.sock.sendto(raw, source)
-    assert ctl.refresh_status().ok
-    assert ctl.state_text == "STARTING" and ctl.session_id == 0
+    assert ctl.start_uncertain and not ctl.refresh_status().sent
+    assert ctl.state_text == "STOPPED" and ctl.session_id == 0  # last report predates START
     n = len(peer.requests)
-    rig[2].now += .5
+    rig[2].now += 2
     ctl.tick()
-    assert not any(r.opcode == P.OP_HEARTBEAT for _, r, _ in peer.requests[n:])
+    assert peer.requests[n:] == []
     assert not ctl.stop().sent
 
 
@@ -544,12 +544,16 @@ def test_unsolicited_boot_id_does_not_reset_a_correlated_session(rig):
 
 
 def test_zero_start_session_is_not_accepted(rig):
-    peer, _, _, ctl = rig
+    peer, _, clock, ctl = rig
     peer.filter = lambda p, r, raw, reply, source: [rewrite(reply, 12, 0, "<I")]
     assert ctl.start().status == "TIMEOUT" and ctl.session_id == 0
-    # Explicit reconnect observes the running lease, without acquiring it.
+    # Disconnect preserves quarantine. A fresh terminal report is required.
     ctl.disconnect()
     peer.filter = lambda p, r, raw, reply, source: [reply]
+    assert not ctl.connect().sent
+    peer.complete_stop()
+    clock.now += 4.5
+    assert ctl.check_start_outcome().ok
     assert ctl.connect().ok and ctl.session_id == 0 and not ctl.stop().sent
 
 

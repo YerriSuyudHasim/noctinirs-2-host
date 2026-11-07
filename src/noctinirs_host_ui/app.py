@@ -22,17 +22,9 @@ from .control_panel import ControlPanel
 from .credits import APP_NAME, BANNER_TEXT, SYNTHETIC_NOTICE, about_text
 from .theme import THEMES, build_qss
 from .live_view import LiveView
+from .resources import geometry_path
 
-GEOMETRY_NAME = "optical_geometry_v1.json"
 LIVE_REFRESH_MS = 100
-
-
-def geometry_path() -> Path:
-    """The geometry file: next to the bundle when frozen, else the repo's config folder."""
-    base = getattr(sys, "_MEIPASS", None)
-    if base is not None:
-        return Path(base) / "config" / GEOMETRY_NAME
-    return Path(__file__).resolve().parents[2] / "config" / GEOMETRY_NAME
 
 
 def _arrow_images(theme) -> tuple[str | None, str | None]:

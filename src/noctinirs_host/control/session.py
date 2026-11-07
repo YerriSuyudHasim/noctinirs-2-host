@@ -8,6 +8,8 @@ Rules (issue #24, firmware ADR-0004):
 * `safe_off` is never blocked by local state and is retried harder than other commands.
 * Automatic traffic is read-only or keep-alive: owner heartbeats in active states,
   status polling during transitions and while idle. START is always explicit.
+* After an ambiguous START, even read-only traffic can renew the peer's lease.
+  Suspend transmission until explicit recovery.
 """
 
 from __future__ import annotations
@@ -32,6 +34,8 @@ from .protocol import (
 HEARTBEAT_PERIOD_S = 0.5  # local implementation record
 STATUS_PERIOD_S = 2.0  # host-chosen: keeps the displayed state fresh while not streaming
 TRANSITION_POLL_S = 0.05  # nn2ctl stop confirmation poll cadence
+START_REPLY_WINDOW_S = 1.5  # bounded original transaction, at most the owner silence interval
+START_QUIET_S = 1.5 + 3.0  # firmware silence + grace; a wait is not STOP evidence
 OWNED_STATES = (ST_STARTING, ST_STREAMING, ST_STOPPING)
 
 
@@ -162,6 +166,7 @@ class SessionController:
         self.raw_capture_sink: Callable[[bytes, int, int | None], object] | None = None
         self._busy = False
         self._stop_requested = False
+        self._start_probe_at: float | None = None
 
     # --- bookkeeping ----------------------------------------------------
     def _log(self, kind: str, text: str) -> None:
@@ -180,6 +185,14 @@ class SessionController:
     def state_text(self) -> str:
         return "NOT CONNECTED" if self.device_state is None else state_name(self.device_state)
 
+    @property
+    def start_uncertain(self) -> bool:
+        return self._start_probe_at is not None
+
+    @property
+    def start_recheck_wait_s(self) -> float:
+        return 0.0 if self._start_probe_at is None else max(0.0, self._start_probe_at - self._clock())
+
     def _receive(self, timeout_s: float) -> tuple[list[bytes], int | None]:
         batch = self._t.receive(timeout_s)
         # UDPTransport returns one datagram. Timestamp at userspace delivery,
@@ -188,14 +201,18 @@ class SessionController:
         return batch, rx_us
 
     # --- one transaction ----------------------------------------------------
-    def _request(self, opcode: int, args: bytes = b"", *, extra_retries: int = 0) -> Reply | None:
+    def _request(self, opcode: int, args: bytes, *, retries: int) -> Reply | None:
         self._rebooted = False
         rid = self._next_id
         self._next_id = (rid + 1) & 0xFFFFFFFF or 1
         self._seq = (self._seq + 1) & 0xFFFFFFFF
         wire = encode_request(rid, opcode, args, session_id=self.session_id, sequence=self._seq)
-        for attempt in range(self.retries + extra_retries + 1):
-            deadline = time.monotonic() + self.timeout_s
+        cutoff = time.monotonic() + START_REPLY_WINDOW_S if opcode == OP_START else math.inf
+        for attempt in range(retries + 1):
+            now = time.monotonic()
+            if now >= cutoff:
+                break
+            deadline = min(now + self.timeout_s, cutoff)
             self._t.send(wire)
             self.counters["sent"] += 1
             if attempt:
@@ -205,7 +222,7 @@ class SessionController:
                 if remaining <= 0:
                     break
                 batch, rx_us = self._receive(remaining)
-                if not batch:
+                if not batch or time.monotonic() >= cutoff:
                     break
                 for raw in batch:
                     reply = self._accept(raw, rid, opcode, args, rx_us)
@@ -298,22 +315,24 @@ class SessionController:
             self._done.discard(min(self._done))
         return reply
 
-    def _run(self, name: str, opcode: int, args: bytes = b"", *, extra_retries: int = 0,
-             note: str = "", quiet_ok: bool = False) -> CommandResult:
+    def _run(self, name: str, opcode: int, args: bytes = b"", *, retries: int | None = None,
+             note: str = "", quiet_ok: bool = False, start_probe: bool = False) -> CommandResult:
         if self._busy:
             return self._reject(name, "another transaction is active")
+        if self.start_uncertain and opcode != OP_SAFE_OFF and not start_probe:
+            return self._reject(name, "START outcome unresolved; use explicit recovery")
         self._busy = True
         try:
-            return self._run_transaction(name, opcode, args, extra_retries=extra_retries,
+            return self._run_transaction(name, opcode, args, retries=self.retries if retries is None else retries,
                                          note=note, quiet_ok=quiet_ok)
         finally:
             self._busy = False
 
-    def _run_transaction(self, name: str, opcode: int, args: bytes, *, extra_retries: int,
+    def _run_transaction(self, name: str, opcode: int, args: bytes, *, retries: int,
                          note: str, quiet_ok: bool) -> CommandResult:
         sent_before = self.counters["sent"]
         try:
-            reply = self._request(opcode, args, extra_retries=extra_retries)
+            reply = self._request(opcode, args, retries=retries)
         except OSError as exc:
             sent = self.counters["sent"] > sent_before
             self.counters["io_errors"] += 1
@@ -324,7 +343,8 @@ class SessionController:
             return CommandResult(name, False, sent, "IO_ERROR", str(exc))
         if reply is None:
             self._log("command", f"{name}{note}: NO REPLY (timeout)")
-            return CommandResult(name, False, True, "TIMEOUT", "no reply from device")
+            return CommandResult(name, False, self.counters["sent"] > sent_before,
+                                 "TIMEOUT", "no reply from device")
         self._set_state(reply)
         if opcode in (OP_START, OP_STOP, OP_SAFE_OFF, OP_CLEAR_FAULT) and reply.ok:
             self.session_id = reply.session_id if opcode in (OP_START, OP_STOP) else 0
@@ -346,6 +366,8 @@ class SessionController:
     def connect(self) -> CommandResult:
         if self._busy:
             return self._reject("connect", "another transaction is active")
+        if self.start_uncertain:
+            return self._reject("connect", "START outcome unresolved; use explicit recovery")
         if self.connected:
             return self._reject("connect", "already connected; disconnect first")
         self._forget_link()
@@ -392,8 +414,7 @@ class SessionController:
 
     def disconnect(self) -> None:
         if self.connected:
-            self._log("link", "disconnected by user (no command sent; a streaming device "
-                              "stops itself after the grace period)")
+            self._log("link", "disconnected (no command sent; device STOP unconfirmed by disconnect)")
         self._forget_link()
         self._t.close()
 
@@ -412,6 +433,17 @@ class SessionController:
         if not self.connected:
             return self._reject("info", "not connected")
         res = self._run("info", OP_INFO)
+        self._observe_end(res)
+        return res
+
+    def refresh_config(self) -> CommandResult:
+        """Read the active Fs and currents without writing either setting."""
+        if not self.connected:
+            return self._reject("get_config", "not connected")
+        res = self._run("get_config", OP_GET_CONFIG)
+        if res.ok:
+            self.settings.fs_hz = res.reply.fs_hz
+            self.settings.current_ma = list(res.reply.current_ma)
         self._observe_end(res)
         return res
 
@@ -486,6 +518,47 @@ class SessionController:
             self._last_hb = self._clock()
             self.last_end = None
             self._stop_requested = False
+        elif res.sent and res.status in ("TIMEOUT", "IO_ERROR"):
+            self._start_probe_at = self._clock() + START_QUIET_S
+            self._log("link", "START outcome unresolved; lease-refresh traffic suspended")
+        return res
+
+    def _run_recovery(self, name: str, opcode: int, args: bytes = b"", *,
+                      retries: int) -> CommandResult:
+        """Allow explicit recovery after disconnect or reboot, without normal connect traffic."""
+        if self._busy:
+            return self._reject(name, "another transaction is active")
+        try:
+            self._t.open()
+        except OSError as exc:
+            self.counters["io_errors"] += 1
+            self._log("link", f"{name}: IO_ERROR ({exc})")
+            return CommandResult(name, False, False, "IO_ERROR", str(exc))
+        try:
+            return self._run(name, opcode, args, retries=retries, start_probe=opcode == OP_STATUS)
+        finally:
+            if not self.connected:
+                self._forget_link()
+                self._t.close()
+
+    def check_start_outcome(self) -> CommandResult:
+        """After the quiet window, explicitly ask for terminal state without taking a lease."""
+        name = "check_start_outcome"
+        if not self.start_uncertain:
+            return self._reject(name, "no unresolved START")
+        if self.start_recheck_wait_s > 0:
+            return self._reject(name, "wait for the quiet window before checking device state")
+        res = self._run_recovery(name, OP_STATUS, args_host_time(int(self._clock() * 1e6)), retries=0)
+        if res.ok and res.reply.session_id == 0 and res.reply.state in (ST_STOPPED, ST_SAFE_OFF):
+            self._start_probe_at = None
+            self._log("link", f"START uncertainty resolved by device report: {res.reply.state_text}")
+            return res
+        # A valid owner STATUS can itself refresh the lease if the device is still active.
+        if res.sent:
+            self._start_probe_at = self._clock() + START_QUIET_S
+        if res.ok:
+            return CommandResult(name, False, res.sent, "START_UNRESOLVED",
+                                 f"peer reported {res.reply.state_text}; ownership not acquired", res.reply)
         return res
 
     def stop(self) -> CommandResult:
@@ -502,7 +575,16 @@ class SessionController:
 
     def safe_off(self) -> CommandResult:
         """Never blocked locally; extra retries. Works even if the state is unknown."""
-        res = self._run("safe_off", OP_SAFE_OFF, extra_retries=3)
+        if self.start_uncertain:
+            res = self._run_recovery("safe_off", OP_SAFE_OFF, retries=self.retries + 3)
+            if res.ok and res.reply.state == ST_SAFE_OFF:
+                self._start_probe_at = None
+                self._log("link", "START uncertainty resolved by device report: SAFE_OFF")
+            elif res.ok:
+                return CommandResult("safe_off", False, res.sent, "START_UNRESOLVED",
+                                     "reply did not report SAFE_OFF", res.reply)
+        else:
+            res = self._run("safe_off", OP_SAFE_OFF, retries=self.retries + 3)
         if res.ok:
             self.last_end = "SAFE_OFF"
             self._stop_requested = False
@@ -589,7 +671,7 @@ class SessionController:
         if not self.connected:
             return
         self.pump()
-        if not self.connected:
+        if not self.connected or self.start_uncertain:
             return
         now = self._clock()
         if self.session_id and self.device_state in OWNED_STATES:
