@@ -39,6 +39,17 @@ def sidecar(rec):
     return json.loads(rec.json_path.read_text(encoding="utf-8"))
 
 
+def assert_raw_balance(meta, *, enqueued, persisted, dropped, rows):
+    raw = meta["raw"]
+    assert raw["observed_before_queue"]["packets"] == enqueued + dropped
+    assert raw["packets_enqueued"] == enqueued
+    assert raw["persisted_archive"]["packets"] == persisted
+    assert raw["enqueued_not_confirmed_in_archive"] == enqueued - persisted
+    assert raw["queue_drops"] == dropped
+    assert meta["counters"]["queue_drops"] >= dropped
+    assert raw["csv_rows_written"] == rows <= raw["persisted_archive"]["samples"]
+
+
 def test_mixed_capture_round_trips_exact_wire_and_projects_raw_rows(tmp_path):
     rec = recorder(tmp_path, clock_us=lambda: 70)
     rec.start()
@@ -171,8 +182,60 @@ class WrappedFile:
         return getattr(self._fh, name)
 
 
-def test_stuck_raw_writer_keeps_receive_and_stop_bounded_and_separates_loss(tmp_path):
+def test_active_metadata_keeps_one_packet_accounting_cut(tmp_path, monkeypatch):
+    rec = recorder(tmp_path, json_refresh_s=float("inf"))
+    rec.start()
+    first_written, second_written = threading.Event(), threading.Event()
+    reader_cut, resume_reader = threading.Event(), threading.Event()
+    snapshots = []
+    lock = rec._input_lock
+    write_rows = rec._raw.write_rows
+
+    def signal_after_write(packet):
+        write_rows(packet)
+        event = first_written if packet.raw.first_sample_sequence == 0 else second_written
+        event.set()
+
+    class PauseReaderAfterInputLock:
+        def __enter__(self):
+            return lock.__enter__()
+
+        def __exit__(self, *exc):
+            lock.__exit__(*exc)
+            if threading.current_thread() is reader and not reader_cut.is_set():
+                reader_cut.set()
+                assert resume_reader.wait(5)
+
+    reader = threading.Thread(target=lambda: snapshots.append(rec.metadata()), daemon=True)
+    monkeypatch.setattr(rec._raw, "write_rows", signal_after_write)
+    monkeypatch.setattr(rec, "_input_lock", PauseReaderAfterInputLock())
+    try:
+        assert rec.feed_raw(wire(0)) and first_written.wait(5)
+        reader.start()
+        assert reader_cut.wait(5)
+        assert rec.feed_raw(wire(1)) and second_written.wait(5)
+    finally:
+        resume_reader.set()
+        if reader.ident is not None:
+            reader.join(5)
+        stopped = rec.stop()
+
+    assert not reader.is_alive() and stopped
+    active, = snapshots
+    assert not active["complete"]
+    raw = active["raw"]
+    assert (raw["observed_before_queue"]["packets"], raw["packets_enqueued"],
+            raw["persisted_archive"]["packets"], raw["enqueued_not_confirmed_in_archive"]) == (1, 1, 1, 0)
+    closed = sidecar(rec)
+    assert closed["complete"]
+    assert closed["raw"]["observed_before_queue"]["packets"] == 2
+    assert closed["raw"]["packets_enqueued"] == closed["raw"]["persisted_archive"]["packets"] == 2
+    assert closed["raw"]["enqueued_not_confirmed_in_archive"] == 0
+
+
+def test_stuck_raw_writer_keeps_receive_and_stop_bounded_and_separates_loss(tmp_path, monkeypatch):
     entered, release, feed_done = threading.Event(), threading.Event(), threading.Event()
+    timeout_saved = threading.Event()
     accepted = []
 
     def write(fh, data):
@@ -187,6 +250,14 @@ def test_stuck_raw_writer_keeps_receive_and_stop_bounded_and_separates_loss(tmp_
 
     rec = recorder(tmp_path, queue_size=1, opener=opener)
     rec.start()
+    write_json = rec._write_json
+
+    def signal_timeout_snapshot():
+        write_json()
+        if rec._close_timed_out:
+            timeout_saved.set()
+
+    monkeypatch.setattr(rec, "_write_json", signal_timeout_snapshot)
     assert rec.feed_raw(wire(0)) and entered.wait(2)
 
     def receive_while_stuck():
@@ -197,23 +268,67 @@ def test_stuck_raw_writer_keeps_receive_and_stop_bounded_and_separates_loss(tmp_
     feeder.start()
     try:
         assert feed_done.wait(1) and accepted == [True, False, False]
+        active = rec.metadata()
+        assert not active["complete"] and not active["close_timed_out"]
+        assert_raw_balance(active, enqueued=2, persisted=0, dropped=2, rows=0)
         t0 = time.monotonic()
         assert not rec.stop(.25)
         assert time.monotonic() - t0 < 1
+        assert timeout_saved.wait(5)
         meta = sidecar(rec)
         assert not meta["complete"] and meta["close_timed_out"]
-        assert meta["raw"]["queue_drops"] == 2
-        assert meta["raw"]["enqueued_not_confirmed_in_archive"] == 2
+        assert_raw_balance(meta, enqueued=2, persisted=0, dropped=2, rows=0)
         assert meta["raw"]["observed_before_queue"]["forward_gap_samples"] == 1
     finally:
         release.set()
         feeder.join(5)
         rec._thread.join(5)
+    assert not feeder.is_alive() and not rec._thread.is_alive()
+    recovered = sidecar(rec)
+    assert not recovered["complete"] and recovered["close_timed_out"]
+    assert_raw_balance(recovered, enqueued=2, persisted=2, dropped=2, rows=2)
     loaded = replay(rec)
     assert [packet.raw.first_sample_sequence for packet in loaded] == [0, 1]
     assert loaded.diagnostics["forward_gap_samples"] == 0
     assert "incomplete" in loaded.meta_problem and loaded.archive_problem is None
     assert not rec.stop()
+
+
+def test_sidecar_serialization_does_not_hold_input_lock(tmp_path, monkeypatch):
+    rec = recorder(tmp_path, json_refresh_s=0)
+    rec.start()
+    entered, release, feed_done = threading.Event(), threading.Event(), threading.Event()
+    accepted, published = [], []
+    dump = json.dump
+
+    def stall_first_packet_snapshot(meta, *args, **kwargs):
+        if meta["raw"]["persisted_archive"]["packets"] == 1 and not entered.is_set():
+            published.append(meta)
+            entered.set()
+            assert release.wait(10)
+        return dump(meta, *args, **kwargs)
+
+    def feed_during_serialization():
+        accepted.append(rec.feed_raw(wire(1)))
+        feed_done.set()
+
+    feeder = threading.Thread(target=feed_during_serialization, daemon=True)
+    monkeypatch.setattr(json, "dump", stall_first_packet_snapshot)
+    try:
+        assert rec.feed_raw(wire(0)) and entered.wait(5)
+        feeder.start()
+        assert feed_done.wait(5) and accepted == [True]
+        assert_raw_balance(published[0], enqueued=1, persisted=1, dropped=0, rows=1)
+        assert_raw_balance(rec.metadata(), enqueued=2, persisted=1, dropped=0, rows=1)
+    finally:
+        release.set()
+        if feeder.ident is not None:
+            feeder.join(5)
+        stopped = rec.stop()
+    assert not feeder.is_alive() and stopped
+    closed = sidecar(rec)
+    assert closed["complete"]
+    assert_raw_balance(closed, enqueued=2, persisted=2, dropped=0, rows=2)
 
 
 def test_replay_gap_can_be_caused_by_queue_drop_not_stream_gap(tmp_path):
@@ -249,9 +364,9 @@ def test_replay_gap_can_be_caused_by_queue_drop_not_stream_gap(tmp_path):
     loaded = replay(rec)
     assert [packet.raw.first_sample_sequence for packet in loaded] == [0, 1, 3]
     assert loaded.diagnostics["forward_gap_samples"] == 1
-    meta = sidecar(rec)["raw"]
-    assert meta["observed_before_queue"]["forward_gap_samples"] == 0
-    assert meta["queue_drops"] == 1 and meta["enqueued_not_confirmed_in_archive"] == 0
+    meta = sidecar(rec)
+    assert meta["complete"] and meta["raw"]["observed_before_queue"]["forward_gap_samples"] == 0
+    assert_raw_balance(meta, enqueued=3, persisted=3, dropped=1, rows=3)
 
 
 @pytest.mark.parametrize("suffix", [".raw.bin", ".raw.csv"])
@@ -274,7 +389,7 @@ def test_short_raw_write_is_visible_and_salvages_complete_wire(tmp_path, suffix)
     assert bool(loaded.archive_problem) == (suffix == ".raw.bin")
     meta = sidecar(rec)
     assert "short RAW" in meta["writer_error"] and not meta["complete"]
-    assert meta["raw"]["enqueued_not_confirmed_in_archive"] == int(suffix == ".raw.bin")
+    assert_raw_balance(meta, enqueued=1, persisted=int(suffix == ".raw.csv"), dropped=0, rows=0)
 
 
 @pytest.mark.parametrize("damage", ["header", "body", "crc", "boundary"])

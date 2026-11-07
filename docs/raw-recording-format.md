@@ -64,11 +64,9 @@ values are inferred from the CSV.
   including packets the queue drops. It excludes packets rejected before
   the sink, which are covered by controller/transport counters. `persisted_archive`
   is computed on the original records the writer flushed and is recomputed
-  in replay. It can have additional holes from recorder drops. Separate
-  counters report queue-full drops, enqueued records not confirmed in the
-  archive, rejected datagrams and the writer error. A firmware `GAP_BEFORE`
-  flag is counted separately from host sequence holes and provides no exact
-  loss quantity. A host gap alone cannot identify firmware, transport, or host
+  in replay. It can have additional holes from recorder drops. A firmware
+  `GAP_BEFORE` flag is counted separately from host sequence holes and provides
+  no exact loss quantity. A host gap alone cannot identify firmware, transport, or host
   receive loss, or loss before the first or after the last accepted sample.
 - Device `timestamp_us` is the first sample's anchor from this firmware profile.
   Its sender sets `TS_ESTIMATED`; preserve it even though the source is the
@@ -139,6 +137,20 @@ observed_boot_id)` with a single source and timestamp basis. `feed(wire)` also
 handles layout 3 when opted in, using the recorder's clock and unknown boot ID.
 
 ## Bounded writing, recovery and replay
+
+The RAW packet counters describe one in-memory state, including in an active
+or incomplete sidecar. `observed_before_queue.packets` equals `packets_enqueued`
+plus `raw.queue_drops`. The top-level `counters.queue_drops` includes drops of
+both RAW and other input, so it is at least `raw.queue_drops`.
+`persisted_archive.packets` counts binary records whose writes and flushes the
+writer has confirmed. It is at most `packets_enqueued`. The difference is
+`enqueued_not_confirmed_in_archive`. It can include queued or in-flight records
+and records left unconfirmed after a writer error. A clean close drains that
+balance to zero even if there were earlier queue drops. `csv_rows_written`
+counts flushed sample rows and can lag the binary sample count if CSV output
+is in progress or fails. Rejections are reported separately from observed valid
+packets. A published sidecar can lag on-disk bytes, especially
+after a timeout or crash. Replay reports the valid binary records it recovers.
 
 The receiver validates bounded datagrams, updates a bounded tracker and offers
 them to the shared queue without waiting for free space or doing disk I/O.

@@ -62,8 +62,7 @@ class RawArchive:
         self.path = folder / f"{stem}.raw.bin"
         self.csv_path = folder / f"{stem}.raw.csv"
         self.wire = self.csv = None
-        self.packets = self.rows = 0
-        self.continuity = RawContinuity()
+        self.packets = 0  # worker-only ordinal for the sample CSV
 
     def open(self, opener) -> None:
         self.wire = opener(self.path, "xb")
@@ -72,12 +71,11 @@ class RawArchive:
         write_exact(self.csv, ",".join(RAW_COLUMNS) + "\n")
 
     def write_packet(self, packet: RecordedRaw) -> None:
-        env, raw, boot = packet.envelope, packet.raw, packet.observed_boot_id
+        boot = packet.observed_boot_id
         record = _RECORD.pack(len(packet.wire), int(boot is not None), packet.host_rx_us,
                               0 if boot is None else boot) + packet.wire
         write_exact(self.wire, record + _CRC.pack(zlib.crc32(record)))
         self.packets += 1
-        self.continuity.observe(env, raw, packet.host_rx_us, boot)
 
     def write_rows(self, packet: RecordedRaw) -> None:
         env, raw, boot = packet.envelope, packet.raw, packet.observed_boot_id
@@ -89,7 +87,6 @@ class RawArchive:
             (*prefix, sample.sample_sequence, *sample.ain, sample.phase_class, sample.slot_index)
             for sample in raw.samples)
         write_exact(self.csv, buf.getvalue())
-        self.rows += raw.sample_count
 
     def files(self):
         return (fh for fh in (self.wire, self.csv) if fh is not None and not fh.closed)

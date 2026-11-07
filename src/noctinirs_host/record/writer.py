@@ -93,6 +93,8 @@ class Recorder:
         self.json_path = self.folder / f"{self.stem}.json"
         self._raw = RawArchive(self.folder, self.stem) if record_raw else None
         self._raw_observed = RawContinuity() if record_raw else None
+        self._raw_persisted = RawContinuity() if record_raw else None
+        self._raw_rows_written = 0
         self._raw_context_start: dict | None = None
         self._raw_context_end: dict | None = None
         self._raw_facts: dict = {}
@@ -102,7 +104,7 @@ class Recorder:
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._json_lock = threading.Lock()
-        self._input_lock = threading.Lock()
+        self._input_lock = threading.Lock()  # input, RAW accounting and close state; never I/O
         self._thread: threading.Thread | None = None
         self._fh = None
         self._rejects = RejectCounters()
@@ -155,7 +157,7 @@ class Recorder:
             if self._raw is not None:
                 self._raw.open(self._opener)
         except Exception as exc:
-            self.error = f"{type(exc).__name__}: {exc}"
+            self._record_writer_error(exc)
             self._close_files()
             if self._raw is not None:
                 self._publish_incomplete()  # publish the start error if sidecar I/O works
@@ -181,8 +183,9 @@ class Recorder:
         # Reserve a small part of the deadline for publishing timeout metadata.
         self._thread.join(max(0, timeout_s - min(0.05, timeout_s / 5)))
         if self._thread.is_alive():
-            self._close_timed_out = True
-            self._complete = False
+            with self._input_lock:
+                self._close_timed_out = True
+                self._complete = False
             # Sidecar I/O can also stall. Never wait for a disk or its lock on this thread.
             reporter = threading.Thread(target=self._publish_incomplete, daemon=True)
             reporter.start()
@@ -194,8 +197,14 @@ class Recorder:
         try:
             self._write_json()
         except Exception as e:
-            if self.error is None:
-                self.error = f"{type(e).__name__}: {e}"
+            self._record_writer_error(e, keep_existing=True)
+
+    def _record_writer_error(self, exc: Exception, *, keep_existing: bool = False) -> None:
+        message = f"{type(exc).__name__}: {exc}"
+        with self._input_lock:
+            if not keep_existing or self.error is None:
+                self.error = message
+            self._complete = False
 
     # ---- input (receiver thread) -------------------------------------------------------
     def feed(self, datagram: bytes) -> None:
@@ -280,10 +289,15 @@ class Recorder:
                         break
                 else:
                     if isinstance(item, RecordedRaw):
-                        assert self._raw is not None
+                        assert self._raw is not None and self._raw_persisted is not None
                         self._raw.write_packet(item)
+                        with self._input_lock:
+                            self._raw_persisted.observe(item.envelope, item.raw, item.host_rx_us,
+                                                        item.observed_boot_id)
                         self._remember(item.envelope)
                         self._raw.write_rows(item)
+                        with self._input_lock:
+                            self._raw_rows_written += item.raw.sample_count
                     else:
                         self._handle(*item)
                 now = time.monotonic()
@@ -299,23 +313,24 @@ class Recorder:
                 os.fsync(fh.fileno())
                 fh.close()
             facts = self._file_facts()
-            if self._raw is not None:
-                self._raw_facts = self._raw.facts()
-            self._extra.update(facts)
-            self._complete = not self._close_timed_out
+            raw_facts = self._raw.facts() if self._raw is not None else {}
+            with self._input_lock:
+                self._raw_facts = raw_facts
+                self._extra = facts
+                self._complete = not self._close_timed_out
         except Exception as e:  # noqa: BLE001 - report, never crash the app
-            self.error = f"{type(e).__name__}: {e}"
-            self._complete = False
+            self._record_writer_error(e)
         finally:
             with self._input_lock:
                 self.running = False
             self._close_files()
-            self._stopped_utc = _utc(self._wall())
+            stopped_utc = _utc(self._wall())
+            with self._input_lock:
+                self._stopped_utc = stopped_utc
             try:
                 self._write_json()
             except Exception as e:
-                self.error = f"{type(e).__name__}: {e}"
-                self._complete = False
+                self._record_writer_error(e)
 
     def _files(self):
         if self._fh is not None and not self._fh.closed:
@@ -328,9 +343,7 @@ class Recorder:
             try:
                 fh.close()
             except Exception as exc:
-                if self.error is None:
-                    self.error = f"{type(exc).__name__}: {exc}"
-                self._complete = False
+                self._record_writer_error(exc, keep_existing=True)
 
     def _handle(self, rx_us: int, data: bytes) -> None:
         try:
@@ -378,25 +391,31 @@ class Recorder:
         with self._lock:
             events = list(self._events)
             sessions, gates, sims = list(self._sessions), sorted(self._gates), set(self._sim_flags)
+            event_drops, session_ids_omitted = self._event_drops, self._session_ids_omitted
+        with self._input_lock:
+            counters = dict(self.counters)
+            raw_accounting = self._raw_accounting() if self._raw is not None else None
+            context_end, raw_facts, extra = self._raw_context_end, self._raw_facts, self._extra
+            status = dict(complete=self._complete and not self._close_timed_out,
+                          stopped_utc=self._stopped_utc, writer_error=self.error,
+                          close_timed_out=self._close_timed_out)
         simulated = None if not sims else (True if sims == {True} else False)
         evidence = {True: "simulation", False: "unknown", None: "unknown"}[simulated]
         if len(sims) > 1:
             evidence = "mixed (simulated and non-simulated frames) - do not use as one evidence class"
         g = self.geometry
-        counters = dict(self.counters)
         counters["rejected"] = dict(self._rejects.rejected)
         meta = {
-            "schema": SCHEMA, "complete": self._complete and not self._close_timed_out,
+            "schema": SCHEMA, **status,
             "host_version": HOST_VERSION, "host_sha": self._host_sha,
             "host_sha_source": "caller_supplied" if self._host_sha else None,
             "created_utc": self._created_utc, "started_utc": self._started_utc,
-            "stopped_utc": self._stopped_utc, "simulated": simulated, "evidence_class": evidence,
+            "simulated": simulated, "evidence_class": evidence,
             "firmware_pin": FIRMWARE_PIN, "contract": CONTRACT,
             "firmware_pin_source": "host_control_codec_reference; not device identity",
             "optical_firmware_pin": OPTICAL_PIN, "optical_contract": OPTICAL_CONTRACT,
             "firmware": copy.deepcopy(self._firmware), "host_time_basis": self._host_time_basis,
             "settings_at_start": copy.deepcopy(self._start_settings),
-            "writer_error": self.error, "close_timed_out": self._close_timed_out,
             "queue_capacity": self._q.maxsize,
             "geometry": {"map_id": g.geometry_map_id, "sha256": g.sha256, "status": g.status},
             "gate_config_ids": gates,
@@ -409,36 +428,35 @@ class Recorder:
                      "changes are in events. Raw layout-3 packets and rejected datagrams are "
                      "counted, not stored."),
         }
-        meta.update(self._extra)
+        meta.update(extra)
         if self._raw is not None:
-            meta["raw"] = self._raw_metadata()
+            assert raw_accounting is not None
+            meta["raw"] = {
+                "schema": RAW_SCHEMA, "classification": "ENGINEERING/non-science",
+                "contract": RAW_CONTRACT, "contract_firmware_sha": FIRMWARE_PIN,
+                "contract_firmware_sha_source": "local compatibility target, not observed device identity",
+                "observed_boot_id_source": "capture caller; SessionController uses latest correlated reply",
+                "nominal_adc_sps": None,  # not an observation carried by this RAW profile
+                "archive_file": self._raw.path.name, "csv_file": self._raw.csv_path.name,
+                "archive_sha256": None, "archive_bytes": None, "csv_sha256": None, "csv_bytes": None,
+                "context_at_start": copy.deepcopy(self._raw_context_start),
+                "context_at_end": copy.deepcopy(context_end),
+                "event_drops": event_drops, "packets_with_session_id_omitted": session_ids_omitted,
+                **raw_accounting, **raw_facts,
+            }
             meta["note"] = ("RAW is ENGINEERING/non-science. The RAW binary archive preserves the wire; "
                             "the RAW CSV is a sample projection. OPT2 uses its original CSV format.")
         return meta
 
-    def _raw_metadata(self) -> dict:
-        assert self._raw is not None and self._raw_observed is not None
-        with self._input_lock:
-            enqueued, dropped = self._raw_enqueued, self._raw_drops
-            observed = self._raw_observed.snapshot()
-            rejected = dict(self._raw_rejects.rejected)
-        persisted = self._raw.continuity.snapshot()
+    def _raw_accounting(self) -> dict:
+        """Copy RAW packet accounting while the caller holds _input_lock."""
+        assert self._raw_observed is not None and self._raw_persisted is not None
+        persisted = self._raw_persisted.snapshot()
         return {
-            "schema": RAW_SCHEMA, "classification": "ENGINEERING/non-science",
-            "contract": RAW_CONTRACT, "contract_firmware_sha": FIRMWARE_PIN,
-            "contract_firmware_sha_source": "local compatibility target, not observed device identity",
-            "observed_boot_id_source": "capture caller; SessionController uses latest correlated reply",
-            "nominal_adc_sps": None,  # not an observation carried by this RAW profile
-            "archive_file": self._raw.path.name, "csv_file": self._raw.csv_path.name,
-            "archive_sha256": None, "archive_bytes": None, "csv_sha256": None, "csv_bytes": None,
-            "context_at_start": copy.deepcopy(self._raw_context_start),
-            "context_at_end": copy.deepcopy(self._raw_context_end),
-            "observed_before_queue": observed, "persisted_archive": persisted,
-            "packets_enqueued": enqueued, "queue_drops": dropped,
-            "enqueued_not_confirmed_in_archive": max(0, enqueued - persisted["packets"]),
-            "csv_rows_written": self._raw.rows, "rejected": rejected,
-            "event_drops": self._event_drops, "packets_with_session_id_omitted": self._session_ids_omitted,
-            **self._raw_facts,
+            "observed_before_queue": self._raw_observed.snapshot(), "persisted_archive": persisted,
+            "packets_enqueued": self._raw_enqueued, "queue_drops": self._raw_drops,
+            "enqueued_not_confirmed_in_archive": self._raw_enqueued - persisted["packets"],
+            "csv_rows_written": self._raw_rows_written, "rejected": dict(self._raw_rejects.rejected),
         }
 
     def _write_json(self) -> None:
