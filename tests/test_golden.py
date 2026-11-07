@@ -133,3 +133,25 @@ def test_host_geometry_copy_is_byte_identical_to_firmware_file():
     geo = load_geometry(host)
     assert geo.is_draft  # status draft_pending_caliper: distances not locked
     assert geo.geometry_map_id == 1 and len(geo.channels) == 20
+
+
+def test_opt2_recording_replays_every_accepted_pinned_vector(tmp_path):
+    from helpers import build_envelope
+    from noctinirs_host.record.reader import read_recording
+    from noctinirs_host.record.writer import Recorder
+
+    geo = load_geometry(ROOT / "config" / "optical_geometry_v1.json")
+    rec = Recorder(tmp_path, geo, name="golden", clock_us=lambda: 123)
+    originals = []
+    rec.start()
+    for i, vector in enumerate(_frame_vectors()):
+        if vector["layout"] == 2 and vector["decode_result"] == "OK" and vector["expected_hex"]:
+            packet = build_envelope(bytes.fromhex(vector["expected_hex"]), msg_type=2,
+                                    msg_sequence=i, session_id=0xFFFFFFFF,
+                                    ts=2**64 - 1, flags=3)
+            originals.append(packet)
+            rec.feed(packet)
+    assert rec.stop() and originals
+    loaded = read_recording(rec.csv_path)
+    assert [f.datagram() for f in loaded.frames] == originals
+    assert loaded.meta_problem is None and loaded.bad_rows == loaded.partial_frames_dropped == 0

@@ -5,12 +5,18 @@ datagrams that were received (bit-exact replay)."""
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
+import struct
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..control.protocol import encode_frame
+from ..wire.envelope import parse_envelope
+from ..wire.errors import WireError
+from ..wire.optical import parse_opt2
 from .codec import COLUMNS, FRAME_COLS, ROWS_PER_FRAME, rows_to_payload
+from .meta import validate_metadata
 
 
 @dataclass(frozen=True)
@@ -59,7 +65,11 @@ def _load_meta(csv_path: Path) -> tuple[dict | None, str | None]:
     if not jp.is_file():
         return None, "sidecar .json is missing"
     try:
-        return json.loads(jp.read_text(encoding="utf-8")), None
+        meta = json.loads(jp.read_text(encoding="utf-8"))
+        if not isinstance(meta, dict):
+            return None, "sidecar .json must contain an object"
+        missing = validate_metadata(meta)
+        return meta, f"sidecar missing fields: {', '.join(missing)}" if missing else None
     except (OSError, ValueError) as e:
         return None, f"sidecar .json unreadable: {e}"
 
@@ -68,16 +78,12 @@ def read_recording(csv_path: str | Path) -> Recording:
     path = Path(csv_path)
     rec = Recording(path)
     rec.meta, rec.meta_problem = _load_meta(path)
-    text = path.read_text(encoding="utf-8", errors="replace")
-    lines = text.split("\n")
-    if lines and lines[-1] != "":
-        lines.pop()  # last line has no newline: it was cut off
-        rec.bad_rows += 1
-    else:
-        lines.pop()  # the empty string after the final newline
-    if not lines or lines[0].split(",") != list(COLUMNS):
-        rec.header_ok = False
-        return rec
+    if rec.meta and rec.meta.get("complete") is True:
+        with path.open("rb") as fh:
+            digest = hashlib.file_digest(fh, "sha256").hexdigest()
+        if rec.meta.get("csv_bytes") != path.stat().st_size or rec.meta.get("csv_sha256") != digest:
+            problem = "CSV size/SHA256 differs from clean-close sidecar; salvaging complete frames"
+            rec.meta_problem = "; ".join(filter(None, (rec.meta_problem, problem)))
     group: list[list[str]] = []
     key = None
 
@@ -90,22 +96,45 @@ def read_recording(csv_path: str | Path) -> Recording:
         else:
             try:
                 vals, payload = rows_to_payload(group)
-            except (ValueError, IndexError):
+                frame = RecordedFrame(vals["host_rx_us"], vals["session_id"],
+                                      vals["msg_sequence"], vals["env_flags"],
+                                      vals["device_ts_us"], payload)
+                # Edited or torn numeric cells must not escape as malformed replay packets.
+                parse_opt2(payload)
+                parse_envelope(frame.datagram())
+            except (ValueError, IndexError, struct.error, OverflowError, WireError):
                 rec.bad_rows += len(group)
             else:
-                rec.frames.append(RecordedFrame(vals["host_rx_us"], vals["session_id"],
-                                                vals["msg_sequence"], vals["env_flags"],
-                                                vals["device_ts_us"], payload))
+                rec.frames.append(frame)
         group = []
 
-    for row in csv.reader(lines[1:]):
-        if len(row) != len(COLUMNS):
-            rec.bad_rows += 1
-            continue
-        k = tuple(row[:len(FRAME_COLS)])
-        if k != key:
-            flush_group()
-            key = k
-        group.append(row)
+    with path.open(encoding="utf-8", errors="replace", newline="") as fh:
+        if fh.readline().rstrip("\r\n").split(",") != list(COLUMNS):
+            rec.header_ok = False
+            return rec
+        def complete_lines():
+            for line in fh:
+                if line.endswith("\n"):
+                    yield line
+                else:
+                    rec.bad_rows += 1
+
+        rows = csv.reader(complete_lines(), strict=True)
+        while True:
+            try:
+                row = next(rows)
+            except StopIteration:
+                break
+            except csv.Error:
+                rec.bad_rows += 1
+                continue
+            if len(row) != len(COLUMNS):
+                rec.bad_rows += 1
+                continue
+            k = tuple(row[:len(FRAME_COLS)])
+            if k != key or len(group) == ROWS_PER_FRAME:
+                flush_group()
+                key = k
+            group.append(row)
     flush_group()
     return rec

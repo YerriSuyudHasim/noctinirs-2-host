@@ -13,6 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12.7"
@@ -28,7 +30,24 @@ jobs:
               data = urllib.request.urlopen(pins["download_base"] + entry["path"]).read()
               open(os.path.join("golden", name), "wb").write(data)
           PY
+      - name: Record test environment
+        run: |
+          git rev-parse HEAD > test-environment.txt
+          date -u >> test-environment.txt
+          uname -a >> test-environment.txt
+          python --version >> test-environment.txt
+          python -m pip freeze >> test-environment.txt
       - name: Test
         env:
           NN2_GOLDEN_DIR: golden
-        run: python -m pytest -q -rs
+        run: python -m pytest -q -rs --junitxml=test-results.xml
+      - name: Preserve host test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: host-tests-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            test-results.xml
+            test-environment.txt
+            config/reference_pins.json
+          if-no-files-found: error
