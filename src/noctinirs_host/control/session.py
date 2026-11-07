@@ -142,6 +142,7 @@ class SessionController:
         self.session_id = 0
         self.settings = Settings()
         self.info: dict[str, str] = {}
+        self._connected_info: Reply | None = None
         self.events: list[Event] = []
         self.listeners: list[Callable[[Event], None]] = []
         self.counters = dict(sent=0, retries=0, timeouts=0, unmatched=0, duplicate_replies=0,
@@ -158,6 +159,7 @@ class SessionController:
         self.frame_sink: Callable[[bytes], object] | None = None
         # Validated RAW datagrams, unchanged. No recorder or implicit storage.
         self.raw_sink: Callable[[bytes], object] | None = None
+        self.raw_capture_sink: Callable[[bytes, int, int | None], object] | None = None
         self._busy = False
         self._stop_requested = False
 
@@ -178,6 +180,13 @@ class SessionController:
     def state_text(self) -> str:
         return "NOT CONNECTED" if self.device_state is None else state_name(self.device_state)
 
+    def _receive(self, timeout_s: float) -> tuple[list[bytes], int | None]:
+        batch = self._t.receive(timeout_s)
+        # UDPTransport returns one datagram. Timestamp at userspace delivery,
+        # before routing or callbacks; batch-based test transports share this stamp.
+        rx_us = time.time_ns() // 1000 if batch and self.raw_capture_sink is not None else None
+        return batch, rx_us
+
     # --- one transaction ----------------------------------------------------
     def _request(self, opcode: int, args: bytes = b"", *, extra_retries: int = 0) -> Reply | None:
         self._rebooted = False
@@ -195,11 +204,11 @@ class SessionController:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
-                batch = self._t.receive(remaining)
+                batch, rx_us = self._receive(remaining)
                 if not batch:
                     break
                 for raw in batch:
-                    reply = self._accept(raw, rid, opcode, args)
+                    reply = self._accept(raw, rid, opcode, args, rx_us)
                     if reply is not None:
                         return reply
                     if self._rebooted:
@@ -207,7 +216,7 @@ class SessionController:
         self.counters["timeouts"] += 1
         return None
 
-    def _route_frame(self, raw: bytes) -> bool:
+    def _route_frame(self, raw: bytes, rx_us: int | None) -> bool:
         """True if `raw` is a FRAME datagram (consumed here, never mistaken for a reply)."""
         try:
             env = parse_envelope(raw)
@@ -226,6 +235,10 @@ class SessionController:
                 except WireError:
                     self.counters["malformed"] += 1
                     return True
+                if self.raw_capture_sink is not None and rx_us is not None:
+                    self.counters["raw_routed"] += 1
+                    self.raw_capture_sink(raw, rx_us, self.boot_id)
+                    return True
                 if self.raw_sink is not None:
                     self.counters["raw_routed"] += 1
                     self.raw_sink(raw)
@@ -237,8 +250,9 @@ class SessionController:
                 self.frame_sink(raw)
         return is_frame
 
-    def _accept(self, raw: bytes, rid: int, opcode: int, args: bytes) -> Reply | None:
-        if self._route_frame(raw):
+    def _accept(self, raw: bytes, rid: int, opcode: int, args: bytes,
+                rx_us: int | None) -> Reply | None:
+        if self._route_frame(raw, rx_us):
             return None
         try:
             reply = decode_reply(raw)
@@ -345,6 +359,7 @@ class SessionController:
             self.disconnect()
             return res
         self.info = res.reply.info
+        self._connected_info = res.reply
         for key, attr in (("fs_min", "fs_min"), ("fs_max", "fs_max")):
             try:
                 setattr(self.settings, attr, int(self.info[key]))
@@ -387,9 +402,63 @@ class SessionController:
         self.device_state, self.session_id, self.boot_id = None, 0, None
         self.settings = Settings()
         self.info = {}
+        self._connected_info = None
         self._stop_requested = False
 
     close = disconnect
+
+    def refresh_info(self) -> CommandResult:
+        """Explicit read-only INFO for current identity, mode and RAW diagnostics."""
+        if not self.connected:
+            return self._reject("info", "not connected")
+        res = self._run("info", OP_INFO)
+        self._observe_end(res)
+        return res
+
+    def recording_snapshot(self, *, info: CommandResult | None = None,
+                           status: CommandResult | None = None) -> dict:
+        """Copy current host context and explicitly supplied device observations. No I/O."""
+        def observation(result: CommandResult | None, opcode: int) -> Reply | None:
+            if result and result.ok and result.reply and result.reply.opcode == opcode:
+                if result.reply.boot_id == self.boot_id:
+                    return result.reply
+            return None
+
+        def reply_context(reply: Reply) -> dict:
+            return dict(boot_id=reply.boot_id, session_id=reply.session_id,
+                        device_reply_us=reply.device_us, state=reply.state_text)
+
+        fresh_info = observation(info, OP_INFO)
+        reported = fresh_info or self._connected_info
+        status_reply = observation(status, OP_STATUS)
+        info_snapshot = None if reported is None else {
+            **reply_context(reported), "source": "INFO" if fresh_info else "connection_INFO",
+            "ascii": reported.extension.decode("ascii"), "fields": dict(reported.info),
+        }
+        raw_diag = None
+        if fresh_info is not None:
+            raw_diag = {**reply_context(fresh_info), "source": "INFO"}
+            for field in ("raw_packets_sent", "raw_dropped_samples", "raw_buffer_highwater"):
+                value = fresh_info.info.get(field, "")
+                raw_diag[field] = (int(value) if value.isdecimal() and len(value) <= 10
+                                   and int(value) <= 0xffffffff else None)
+        endpoint = getattr(self._t, "endpoint", None)
+        transport_counters = getattr(self._t, "counters", None)
+        return {
+            "host_snapshot_us": time.time_ns() // 1000, "source_endpoint": endpoint,
+            "boot_id": self.boot_id, "owned_session_id": self.session_id or None,
+            "device_state": self.state_text if self.connected else None,
+            "fault_code": self.fault_code if self.connected else None, "simulated": self.simulated,
+            "config": {"fs_hz": self.settings.fs_hz,
+                       "mode": fresh_info.info.get("mode") if fresh_info else self.settings.mode,
+                       "led_current_ma": list(self.settings.current_ma) or None},
+            "observed_info": info_snapshot, "firmware_raw_diagnostics": raw_diag,
+            "firmware_status": None if status_reply is None else {
+                **reply_context(status_reply), "source": "STATUS", "counters": dict(status_reply.counters),
+            },
+            "host_controller_counters": dict(self.counters),
+            "host_transport_counters": None if transport_counters is None else dict(transport_counters),
+        }
 
     def refresh_status(self, *, quiet: bool = False) -> CommandResult:
         res = self._run("status", OP_STATUS, args_host_time(int(self._clock() * 1e6)),
@@ -496,11 +565,11 @@ class SessionController:
             return
         try:
             for _ in range(256):  # bounded work per call
-                batch = self._t.receive(0.0)
+                batch, rx_us = self._receive(0.0)
                 if not batch:
                     return
                 for raw in batch:
-                    if not self._route_frame(raw):
+                    if not self._route_frame(raw, rx_us):
                         try:
                             reply = decode_reply(raw)
                         except WireError:

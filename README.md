@@ -56,9 +56,15 @@ finally:
 ```
 
 Keep commands/tick on one calling thread. Missing or invalid `fs_allowed` disables
-Fs changes; 1 Hz is rejected. RAW reception is ENGINEERING-only data handling,
-without storage or science interpretation. OPT2 remains simulator/replay support;
-no active firmware OPT2 producer is claimed. Tests use fake peers on loopback.
+Fs changes. The host supports OPT2 from simulation/replay. Tests use fake peers
+on loopback.
+
+## Offline stage C: RAW capture and replay
+
+The core recorder can opt into RAW layout 3. It preserves the original
+datagrams and host receive times in a binary archive and exports a separate
+sample CSV for inspection. RAW is always ENGINEERING/non-science. See the
+[format, integration and replay API](docs/raw-recording-format.md).
 
 ## Desktop UI spike (S0, issue #22)
 

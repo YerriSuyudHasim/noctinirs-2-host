@@ -1,6 +1,7 @@
 # Recording format (host v0.0.1, schema `noctinirs.recording/1`)
 
-A recording is a pair of files with the same name:
+An OPT2 recording is a pair of files with the same name. The same recorder can
+also opt into a separate [RAW binary archive and sample CSV](raw-recording-format.md).
 
 - `noctinirs_<UTC date>_<time>_<sim|dev>.csv` - what the device sent, frame by frame
 - `noctinirs_<UTC date>_<time>_<sim|dev>.json` - context: settings, events, counters
@@ -72,9 +73,9 @@ Additional provenance fields (additive to schema 1):
 
 - `host_sha` and `host_sha_source`: explicitly supplied by the caller; null when unknown.
   The recorder never runs Git or guesses the checkout used by a packaged application.
-- `firmware_pin` remains the control/envelope codec reference
-  `cbec2dab8e23595ae4e374e181c0d7c70f25edec` (ADR-0004 Proposed, rev 3.1 draft).
-  `firmware_pin_source` explicitly says this is not device identity.
+- `firmware_pin` is the control/envelope codec reference. In this host snapshot it is
+  `bd880f5890ea1a72d54e8ab9cc2ed55f002d1382` (ADR-0004 Proposed, rev 4 with the
+  Batch 3 amendment). `firmware_pin_source` distinguishes the codec reference from device identity.
 - `optical_firmware_pin` is `e42f2bc9b453b223bf4557516f63fcceadfddbc8`, matching
   `config/reference_pins.json`; `optical_contract` is the draft v0.4.3 / OPT2 layout 2.
   Golden fixtures and their hashes are tested at this optical pin. PR-A does not migrate
@@ -107,14 +108,12 @@ storage-controller failure.
 
 ## Limits of this version
 
-- **PR-A stores OPT2 only. RAW layout3 packets and rejected datagrams are counted but
-  not stored.** Roadmap issue #20 schedules real UDP/session as PR-B, then actual RAW
-  recording and sample continuity as PR-C; broad UI replay expansion stays deferred.
+- The default OPT2 recorder counts RAW layout 3 packets without storing them.
+  Use `record_raw=True` to enable the stage C archive. Rejected datagrams are counted.
 - The optical geometry is a draft (`draft_pending_caliper`); channel positions and
   distances are not final. Wavelength labels are nominal.
 - The optical contract remains draft. The roadmap's reviewed active firmware snapshot
   `bd880f5890ea1a72d54e8ab9cc2ed55f002d1382` emits RAW ENGINEERING; its actual OPT2
   producer/session integration is later work. This is distinct from PR-A's codec and
   fixture pins, and is not a claim about the image installed on any device.
-- This PR adds no real UDP, RAW storage, UI expansion, Hb processing, firmware change
-  or dependency. Evidence is host/unit and simulation only; no hardware was operated.
+- OPT2 evidence comes from host/unit tests, pinned golden vectors, and simulation.

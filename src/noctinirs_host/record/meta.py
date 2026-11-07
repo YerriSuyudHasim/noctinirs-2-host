@@ -2,10 +2,19 @@
 
 from __future__ import annotations
 
+import hashlib
+from pathlib import Path
+
 SCHEMA = "noctinirs.recording/1"
 CONTRACT = "OPT2 layout 2, firmware ADR-0004 section 3.17 (status Proposed)"
 OPTICAL_PIN = "e42f2bc9b453b223bf4557516f63fcceadfddbc8"
 OPTICAL_CONTRACT = "OPTICAL_DATA_CONTRACT_DRAFT v0.4.3 (draft); OPT2 layout 2"
+
+
+def file_facts(path: Path, prefix: str) -> dict:
+    with path.open("rb") as fh:
+        digest = hashlib.file_digest(fh, "sha256").hexdigest()
+    return {f"{prefix}_sha256": digest, f"{prefix}_bytes": path.stat().st_size}
 
 REQUIRED_FIELDS = (
     "schema", "complete", "host_version", "created_utc", "started_utc", "stopped_utc",

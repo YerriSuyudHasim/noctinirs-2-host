@@ -5,11 +5,13 @@ Its asynchronous completion is driven explicitly by each test, never by sleeps.
 """
 
 import errno
+import json
 import socket
 import struct
 import threading
 import time
 import zlib
+from pathlib import Path
 
 import pytest
 
@@ -18,6 +20,9 @@ from noctinirs_host.control import protocol as P
 from noctinirs_host.control.session import SessionController
 from noctinirs_host.control.simulator import DeviceSimulator
 from noctinirs_host.control.udp import DEFAULT_PORT, UDPTransport
+from noctinirs_host.geometry import load_geometry
+from noctinirs_host.record.raw_archive import RawReplay
+from noctinirs_host.record.writer import Recorder
 
 
 class Clock:
@@ -143,6 +148,70 @@ def test_explicit_endpoint_default_port_and_context_cleanup():
     transport.close()
     with pytest.raises(OSError, match="closed"):
         transport.send(b"x")
+
+
+def test_raw_recorder_uses_session_routing_and_explicit_firmware_snapshots(rig, tmp_path, monkeypatch):
+    peer, transport, clock, ctl = rig
+    prefix = "NoctiNIRS2/test;" + peer.capability
+    peer.capability = prefix + ";raw_packets_sent=0;raw_dropped_samples=0;raw_buffer_highwater=0"
+    assert ctl.set_mode("ENGINEERING").ok
+    assert ctl.recording_snapshot()["firmware_raw_diagnostics"] is None
+    start = ctl.recording_snapshot(info=ctl.refresh_info(), status=ctl.refresh_status())
+    geo = load_geometry(Path(__file__).resolve().parents[1] / "config/optical_geometry_v1.json")
+    rec = Recorder(tmp_path, geo, name="loopback", record_raw=True)
+    rec.start(raw_context=start)
+    ctl.raw_capture_sink = rec.feed_raw
+    ctl.listeners.append(rec.on_controller_event)
+    try:
+        assert ctl.start().ok
+        peer.complete_start()
+        session = ctl.session_id
+        expected = [build_envelope(build_raw(first=12 + i), session_id=session, flags=2 | i,
+                                   msg_sequence=500 + i * 10, ts=20 + 125 * i) for i in range(2)]
+        bad = build_envelope(build_raw(raw_flags=0), session_id=session)
+        foreign = build_envelope(build_raw(), session_id=session + 1)
+        monkeypatch.setattr(time, "time_ns", lambda: 1234567000)
+        peer.sock.sendto(foreign, peer.owner)
+        peer.sock.sendto(bad, peer.owner)
+        peer.sock.sendto(expected[0], peer.owner)
+        ctl.pump()
+        assert ctl.counters["raw_routed"] == 1
+
+        monkeypatch.setattr(time, "time_ns", lambda: 2345678000)
+        peer.filter = lambda *_args: [expected[1], _args[3]]
+        assert ctl.refresh_status().ok  # RAW during a request, before its reply
+        peer.filter = lambda *_args: [_args[3]]
+        assert ctl.stop().ok
+        peer.complete_stop()
+        clock.now += .5
+        ctl.tick()  # Observe lease teardown before asking for end diagnostics.
+        assert ctl.session_id == 0 and ctl.state_text == "STOPPED"
+        peer.capability = prefix + ";raw_packets_sent=2;raw_dropped_samples=4;raw_buffer_highwater=bad"
+        status = ctl.refresh_status()
+        end = ctl.recording_snapshot(info=ctl.refresh_info(), status=status)
+        assert rec.stop(raw_context=end)
+    finally:
+        ctl.raw_capture_sink = None
+        ctl.listeners.remove(rec.on_controller_event)
+        rec.stop()
+    loaded = RawReplay(tmp_path / "loopback.raw.bin")
+    packets = list(loaded)
+    assert [p.datagram() for p in packets] == expected
+    assert [p.host_rx_us for p in packets] == [1234567, 2345678]
+    assert [p.observed_boot_id for p in packets] == [42, 42]
+    assert loaded.diagnostics["forward_gap_samples"] == 0
+    meta = json.loads(rec.json_path.read_text(encoding="utf-8"))
+    begin, end = (meta["raw"][f"context_at_{where}"] for where in ("start", "end"))
+    assert begin["observed_info"]["ascii"].startswith("NoctiNIRS2/test;")
+    assert begin["source_endpoint"] == list(transport.endpoint)
+    assert begin["config"] == dict(mode="ENGINEERING", fs_hz=5, led_current_ma=[30] * 20)
+    assert begin["firmware_raw_diagnostics"]["raw_dropped_samples"] == 0
+    assert end["firmware_raw_diagnostics"]["raw_dropped_samples"] == 4
+    assert end["firmware_raw_diagnostics"]["raw_buffer_highwater"] is None
+    assert end["firmware_status"]["state"] == "STOPPED"
+    assert end["host_controller_counters"]["wrong_session"] == 1
+    assert end["host_controller_counters"]["malformed"] == 1
+    assert meta["raw"]["queue_drops"] == 0
 
 
 @pytest.mark.parametrize("host,port", [("", 3333), ("localhost", 3333),
