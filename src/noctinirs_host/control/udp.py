@@ -47,6 +47,7 @@ class UDPTransport:
             return
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
+            sock.setblocking(False)
             sock.bind(("0.0.0.0", 0))
         except OSError:
             sock.close()
@@ -56,7 +57,11 @@ class UDPTransport:
     def send(self, datagram: bytes) -> None:
         if len(datagram) > MAX_DGRAM:
             raise ValueError("UDP datagram exceeds the protocol MTU")
-        self._get_socket().sendto(datagram, self.endpoint)
+        sock = self._get_socket()
+        # A receive can leave a positive timeout. Send once without waiting
+        # for a writable socket and let backpressure surface as an I/O error.
+        sock.setblocking(False)
+        sock.sendto(datagram, self.endpoint)
 
     def receive(self, timeout_s: float) -> list[bytes]:
         if not math.isfinite(timeout_s) or timeout_s < 0:

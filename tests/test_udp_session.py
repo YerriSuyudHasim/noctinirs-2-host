@@ -4,6 +4,7 @@ The peer models the bd880f5 active control subset independently of DeviceSimulat
 Its asynchronous completion is driven explicitly by each test, never by sleeps.
 """
 
+import errno
 import socket
 import struct
 import threading
@@ -15,6 +16,7 @@ import pytest
 from helpers import build_envelope, build_raw
 from noctinirs_host.control import protocol as P
 from noctinirs_host.control.session import SessionController
+from noctinirs_host.control.simulator import DeviceSimulator
 from noctinirs_host.control.udp import DEFAULT_PORT, UDPTransport
 
 
@@ -538,6 +540,74 @@ def test_receive_and_send_limits_fail_locally(rig):
             tr.receive(timeout)
 
 
+@pytest.mark.parametrize("phase", ["initial_connect", "after_receive", "after_pump"])
+def test_udp_send_backpressure_is_nonblocking_and_visible(monkeypatch, phase):
+    class BackpressuredSocket:
+        def __init__(self):
+            self.timeout = None
+            self.backpressured = False
+            self.send_calls = []
+            self.reads = 0
+            self.closed = False
+            self.replies = []
+            self.simulator = DeviceSimulator()
+
+        def bind(self, _address):
+            pass
+
+        def settimeout(self, timeout):
+            self.timeout = timeout
+
+        def setblocking(self, blocking):
+            self.settimeout(None if blocking else 0.0)
+
+        def sendto(self, datagram, endpoint):
+            self.send_calls.append((self.timeout, P.decode_request(datagram)))
+            if self.backpressured:
+                # Fail immediately on a blocking mode so the regression cannot hang.
+                assert self.timeout == 0.0, f"sendto inherited socket timeout {self.timeout!r}"
+                raise BlockingIOError(errno.EWOULDBLOCK, "test send buffer full")
+            self.replies.extend((reply, endpoint) for reply in self.simulator.handle(datagram))
+            return len(datagram)
+
+        def recvfrom(self, _size):
+            self.reads += 1
+            if self.replies:
+                return self.replies.pop(0)
+            raise BlockingIOError(errno.EWOULDBLOCK, "test receive buffer empty")
+
+        def close(self):
+            self.closed = True
+
+    sock = BackpressuredSocket()
+    monkeypatch.setattr(socket, "socket", lambda *_args: sock)
+    tr = UDPTransport("127.0.0.1")
+    ctl = SessionController(tr)
+    if phase != "initial_connect":
+        assert ctl.connect().ok and ctl.start().ok
+        assert sock.timeout > 0 and ctl.session_id != 0
+        if phase == "after_pump":
+            ctl.pump()
+            assert sock.timeout == 0.0
+    lease = ctl.session_id
+    calls, reads, sent = len(sock.send_calls), sock.reads, ctl.counters["sent"]
+    sock.backpressured = True
+
+    result = ctl.connect() if phase == "initial_connect" else ctl.stop()
+
+    assert not result.ok and not result.sent and result.status == "IO_ERROR"
+    assert "test send buffer full" in result.message
+    assert len(sock.send_calls) == calls + 1 and sock.reads == reads
+    mode, request = sock.send_calls[-1]
+    assert mode == 0.0 and request.session_id == lease
+    assert request.opcode == (P.OP_INFO if phase == "initial_connect" else P.OP_STOP)
+    assert ctl.counters["sent"] == sent and ctl.counters["io_errors"] == 1
+    assert ctl.counters["retries"] == 0
+    assert any(e.kind == "command" and "IO_ERROR" in e.text for e in ctl.events)
+    assert any(e.kind == "link" and "reconnect required" in e.text for e in ctl.events)
+    assert sock.closed and tr.closed and not ctl.connected and ctl.session_id == 0
+
+
 def test_transaction_deadline_is_not_reset_by_unrelated_packets(monkeypatch):
     from types import SimpleNamespace
     from noctinirs_host.control import session
@@ -547,6 +617,7 @@ def test_transaction_deadline_is_not_reset_by_unrelated_packets(monkeypatch):
             self.sent, self.budgets = [], []
         def send(self, raw):
             self.sent.append(raw)
+            now[0] += .05
         def receive(self, timeout):
             self.budgets.append(timeout)
             now[0] += .2
@@ -557,7 +628,7 @@ def test_transaction_deadline_is_not_reset_by_unrelated_packets(monkeypatch):
     ctl = SessionController(tr, retries=1, timeout_s=.5)
     assert ctl.get_time().status == "TIMEOUT"
     assert len(tr.sent) == 2 and tr.sent[0] == tr.sent[1]
-    assert tr.budgets == pytest.approx([.5, .3, .1] * 2)
+    assert tr.budgets == pytest.approx([.45, .25, .05] * 2)
 
 
 def test_request_id_wrap_keeps_retries_identical(rig):

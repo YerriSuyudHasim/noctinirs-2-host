@@ -107,8 +107,8 @@ class Event:
 class CommandResult:
     command: str
     ok: bool
-    sent: bool  # False = rejected locally, nothing went on the wire
-    status: str  # device status name, or LOCAL_REJECT / TIMEOUT
+    sent: bool  # at least one request attempt was accepted by the transport
+    status: str  # device status name, or LOCAL_REJECT / TIMEOUT / IO_ERROR
     message: str
     reply: Reply | None = None
 
@@ -186,11 +186,11 @@ class SessionController:
         self._seq = (self._seq + 1) & 0xFFFFFFFF
         wire = encode_request(rid, opcode, args, session_id=self.session_id, sequence=self._seq)
         for attempt in range(self.retries + extra_retries + 1):
+            deadline = time.monotonic() + self.timeout_s
             self._t.send(wire)
             self.counters["sent"] += 1
             if attempt:
                 self.counters["retries"] += 1
-            deadline = time.monotonic() + self.timeout_s
             for _ in range(64):  # bounded work AND time under unrelated traffic
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -297,15 +297,17 @@ class SessionController:
 
     def _run_transaction(self, name: str, opcode: int, args: bytes, *, extra_retries: int,
                          note: str, quiet_ok: bool) -> CommandResult:
+        sent_before = self.counters["sent"]
         try:
             reply = self._request(opcode, args, extra_retries=extra_retries)
         except OSError as exc:
+            sent = self.counters["sent"] > sent_before
             self.counters["io_errors"] += 1
             self._forget_link()
             self._t.close()
             self._log("link", f"{name}: transport error ({exc}); reconnect required")
             self._log("command", f"{name}{note}: IO_ERROR ({exc})")
-            return CommandResult(name, False, True, "IO_ERROR", str(exc))
+            return CommandResult(name, False, sent, "IO_ERROR", str(exc))
         if reply is None:
             self._log("command", f"{name}{note}: NO REPLY (timeout)")
             return CommandResult(name, False, True, "TIMEOUT", "no reply from device")
