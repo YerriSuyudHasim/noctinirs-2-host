@@ -96,6 +96,10 @@ def read_recording(csv_path: str | Path) -> Recording:
         else:
             try:
                 vals, payload = rows_to_payload(group)
+                # The envelope encoder masks these counters; reject invalid CSV values first.
+                for name in ("session_id", "msg_sequence"):
+                    if not 0 <= vals[name] <= 0xFFFFFFFF:
+                        raise ValueError(f"{name} outside uint32")
                 frame = RecordedFrame(vals["host_rx_us"], vals["session_id"],
                                       vals["msg_sequence"], vals["env_flags"],
                                       vals["device_ts_us"], payload)
