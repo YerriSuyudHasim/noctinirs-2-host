@@ -44,6 +44,7 @@ def window(qapp, tmp_path, monkeypatch):
 
     def open_window(**kwargs):
         kwargs.setdefault("documents", tmp_path / "Documents")
+        kwargs.setdefault("settings", QtCore.QSettings(str(tmp_path / "ui.ini"), QtCore.QSettings.Format.IniFormat))
         w = EngineeringWindow(load_geometry(GEOMETRY), **kwargs)
         windows.append(w)
         w.show()
@@ -223,7 +224,7 @@ def test_long_text_is_not_clipped(window, tmp_path):
 def test_sixteen_plots_fill_and_modes_switch(window):
     w = fake_window(window)
     to_live(w)
-    assert len(w.panel.plots) == 16 and w.panel.shorts == ["SC1L", "SC2L", "SC1R", "SC2R"]
+    assert len(w.panel.plots) == 20 and len(w.panel.longs) == 16 and w.panel.shorts == ["SC1L", "SC2L", "SC1R", "SC2R"]
     press_start(w)
     wait_for(lambda: w.state.get("session"))
     wait_for(lambda: w.panel.finite_channels() == 16, seconds=15)
@@ -266,7 +267,7 @@ def test_invalid_channels_are_gaps_not_zero(window):
     w.panel.select("CH5")
     assert "SATURATED" in dict(w.panel.detail_rows())["State"]
     w.panel.refresh()
-    assert "✕" in w.panel.plots["CH5"].getPlotItem().titleLabel.text
+    assert "✕" in w.panel.rows["CH5"].status.text()
     assert w.panel.finite_points("CH1") > 0 and w.panel.finite_points("CH6") > 0
     screenshot(w, "d2-live-invalid-gaps.png")
     w.stop_button.click()
@@ -501,12 +502,14 @@ def test_live_layout_controls_left_graphs_right_and_plots_follow_the_window(wind
     w.resize(1920, 1080)
     QtTest.QTest.qWait(100)
     assert w.panel.plots["CH1"].height() > small * 1.25      # plots stretch with the window
-    for name in ("Sesi dan kontrol", "Tampilan", "Pratinjau: DPF, SCR, baseline", "Detail channel"):
+    for name in ("Sesi dan status", "Tampilan", "Pratinjau: DPF, SCR, baseline", "Detail channel"):
         assert any(b.text().startswith(name) for b in w.findChildren(QtWidgets.QToolButton)), name
     before = w.panel.plots["CH1"].height()
-    w.section_detail.button.click()                          # fold the detail away
+    w.section_detail.button.click()                          # fold the detail away (animated)
+    wait_for(lambda: not w.section_detail.animating)
     assert not w.detail.isVisible()
     w.section_detail.button.click()
+    wait_for(lambda: not w.section_detail.animating)
     QtTest.QTest.qWait(50)
     assert w.panel.plots["CH1"].height() == before           # the detail never shrinks the graphs for good
     assert not w.section_diag.expanded
@@ -527,10 +530,11 @@ def test_click_opens_channel_detail_and_markers_differ_from_gaps(window):
     warn, unc = w.panel.marker_counts("CH1")
     assert warn > 0 and unc > 0 and w.panel.finite_points("CH1") > 0     # flagged but drawn
     assert w.panel.marker_counts("CH5") == (0, 0) and w.panel.finite_points("CH5") == 0   # a gap
-    assert "▲" in w.panel.plots["CH1"].getPlotItem().titleLabel.text
-    assert "✕" in w.panel.plots["CH5"].getPlotItem().titleLabel.text
-    assert "LEAK_WARN" in w.panel.plots["CH1"].toolTip() or "tanpa koreksi" in w.panel.plots["CH1"].toolTip()
-    w.panel.chips["SC1L"].click()                              # click opens the channel detail
+    assert "▲" in w.panel.rows["CH1"].status.text() or "◆" in w.panel.rows["CH1"].status.text()
+    assert "✕" in w.panel.rows["CH5"].status.text()
+    tip = w.panel.rows["CH1"].tip_provider()                   # the tooltip text is built on demand
+    assert "LEAK_WARN" in tip or "tanpa koreksi" in tip
+    w.panel.rows["SC1L"].name_button.click()                   # click opens the channel detail
     assert w.panel.current == "SC1L" and "SC1L_I735" in w.detail.toPlainText()
     w.panel.plots["CH1"].scene().sigMouseClicked.emit(None)    # a click on a plot selects it as well
     w.panel.select("CH1")

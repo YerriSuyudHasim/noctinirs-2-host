@@ -20,39 +20,18 @@ from noctinirs_host.preview.params import PreviewConfig
 
 from .battery_text import format_battery
 from .credits import APP_NAME, about_text
+from .design import tokens as T
+from .design.manager import ThemeManager, build_palette
 from .preview_panel import PreviewPanel, PreviewSettingsForm
 from .resources import geometry_path
-from .widgets import AutoText, Section
+from .widgets import AutoText, ElidedLabel, FadeStack, Section, SmoothScrollArea, StatusChip
 
 SCREENS = ("Welcome", "Setup", "Live")
 BACKGROUND = ("preview_destination",)  # housekeeping: never shown as "Working", never clears errors
 SETUP_STEPS = ("Device", "MBLL", "Short separation", "Session")
-STYLE = """
-QWidget { color: #102f4b; font-size: 14px; }
-QWidget#root, QScrollArea { background: #f4f8fc; border: 0; }
-QWidget#page { background: #ffffff; border: 1px solid #cfe0ef; border-radius: 10px; }
-QLabel#banner, QLabel#step, QLabel#detail, QLabel#feedback {
-    background: #eef6ff; border: 1px solid #cfe0ef; border-radius: 8px; padding: 8px;
-}
-QLabel#banner { font-size: 14px; font-weight: bold; padding: 5px 8px; }
-QLabel#previewbanner { background: #fff3cf; color: #5f4300; border: 1px solid #e3c36a;
-    border-radius: 6px; padding: 5px; font-weight: bold; }
-QLabel#title { font-size: 24px; font-weight: bold; }
-QLabel#error { color: #992231; }
-QLineEdit, QComboBox, QPlainTextEdit, QTextEdit, QPushButton, QDoubleSpinBox {
-    background: #ffffff; border: 1px solid #cfe0ef; border-radius: 6px; padding: 5px 9px;
-}
-QPushButton#primary { background: #1975cf; color: #ffffff; font-weight: bold; }
-QPushButton:focus, QLineEdit:focus, QComboBox:focus, QTextEdit:focus { border: 2px solid #1975cf; }
-QPushButton:hover { border-color: #1975cf; }
-QPushButton:disabled, QPushButton#primary:disabled { background: #eef6ff; color: #526a80; }
-QLabel#battery { padding: 4px 10px; border: 1px solid #cfe0ef; border-radius: 8px;
-    background: #ffffff; }
-QLabel#battery[level="low"] { background: #fff3cf; color: #5f4300; border-color: #e3c36a; }
-QLabel#battery[level="problem"] { color: #7a5a00; }
-QLabel#chip { padding: 3px 9px; border-radius: 10px; background: #eef6ff; }
-QLabel#chip[active="true"] { background: #1975cf; color: #ffffff; font-weight: bold; }
-"""
+MIN_WINDOW = (900, 560)       # the smallest supported window; navigation and START/STOP stay reachable
+SIDEBAR_W = 340               # default width of the settings panel (300-480 px, a splitter moves it)
+SIDEBAR_MIN, SIDEBAR_MAX = 300, 480
 
 
 class SessionWorker(QtCore.QThread):
@@ -113,12 +92,16 @@ def info_lines(ascii_text: str | None) -> str:
 
 
 class EngineeringWindow(QtWidgets.QMainWindow):
-    def __init__(self, geometry, host_sha=None, *, run_factory=EngineeringRun, documents=None):
+    def __init__(self, geometry, host_sha=None, *, run_factory=EngineeringRun, documents=None,
+                 settings=None):
         super().__init__()
+        # A closed window is destroyed; a lingering one would be re-styled on every theme change.
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.theme = ThemeManager(settings, self)
         self.setWindowTitle("NoctiNIRS 2 Host — RAW Engineering")
         avail = (QtGui.QGuiApplication.primaryScreen().availableGeometry()
                  if QtGui.QGuiApplication.primaryScreen() else None)
-        self.setMinimumSize(640, 420)
+        self.setMinimumSize(*MIN_WINDOW)
         self.resize(min(1320, avail.width()) if avail else 1320, min(900, avail.height()) if avail else 900)
         self.geometry = geometry
         self.state = {}
@@ -140,25 +123,34 @@ class EngineeringWindow(QtWidgets.QMainWindow):
         help_menu.addAction("&About", self._about)
 
         root = QtWidgets.QWidget(objectName="root")
-        root.setStyleSheet(STYLE)
+        self.root = root
         self.setCentralWidget(root)
         layout = QtWidgets.QVBoxLayout(root)
-        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setContentsMargins(T.SPACE_M, T.SPACE_S + 4, T.SPACE_M, T.SPACE_S + 4)
+        layout.setSpacing(T.SPACE_S)
         header = QtWidgets.QHBoxLayout()
+        header.setSpacing(T.SPACE_S)
         layout.addLayout(header)
-        header.addWidget(_label("NoctiNIRS 2 · ENGINEERING / NON-SCIENCE · " + PREVIEW_LABEL, "banner"), 1)
-        self.battery_label = QtWidgets.QLabel("Baterai —")
-        self.battery_label.setObjectName("battery")
-        self.battery_label.setWordWrap(True)
-        self.battery_label.setTextFormat(QtCore.Qt.TextFormat.PlainText)
-        self.battery_label.setMaximumWidth(430)
-        header.addWidget(self.battery_label)
+        self.banner = ElidedLabel("NoctiNIRS 2 · ENGINEERING / NON-SCIENCE · " + PREVIEW_LABEL)
+        self.banner.setObjectName("banner")
+        header.addWidget(self.banner, 1)
+        self.connection_chip = StatusChip("Tidak terhubung", self.theme)
+        self.recording_chip = StatusChip("Rekaman · tidak aktif", self.theme)
+        self.battery_label = StatusChip("Baterai —", self.theme)
+        self.battery_label.setMaximumWidth(380)
+        for chip in (self.connection_chip, self.recording_chip):
+            chip.setWordWrap(False)
+        for chip in (self.connection_chip, self.recording_chip, self.battery_label):
+            header.addWidget(chip)
+        self._build_view_menu(header)
         self.step = _label(name="step")
+        self.step.setVisible(False)         # the step chips of the setup screen already show the position
         layout.addWidget(self.step)
-        self.screens = QtWidgets.QStackedWidget()
+        self.screens = FadeStack(self.theme)
         layout.addWidget(self.screens, 1)
         self.feedback = _label(name="feedback")
         self.feedback.setMaximumHeight(64)   # the navigation row below must always keep its room
+        self.feedback.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.NoTextInteraction)
         self.feedback.hide()
         layout.addWidget(self.feedback)
         self.error = _label(name="error")
@@ -178,8 +170,44 @@ class EngineeringWindow(QtWidgets.QMainWindow):
         self._setup()
         self._live()
         self.folder.setPlainText(self._default_folder)
+        self.theme.changed.connect(self._on_theme_changed)
+        self._on_theme_changed(self.theme.tokens)
         self._go(0)
         self.worker.start()
+
+    # ---- theme and view menu ------------------------------------------------------------------
+    def _build_view_menu(self, header):
+        self.view_button = QtWidgets.QToolButton()
+        self.view_button.setText("Tampilan  ▾")
+        self.view_button.setToolTip("Tema terang/gelap dan gerakan")
+        self.view_button.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
+        menu = QtWidgets.QMenu(self.view_button)
+        group = QtGui.QActionGroup(menu)
+        self.action_light = menu.addAction("Tema terang")
+        self.action_dark = menu.addAction("Tema gelap")
+        for action, name in ((self.action_light, "light"), (self.action_dark, "dark")):
+            action.setCheckable(True)
+            action.setActionGroup(group)
+            action.setChecked(self.theme.name == name)
+            action.triggered.connect(lambda _c=False, n=name: self.theme.set_theme(n))
+        menu.addSeparator()
+        self.action_reduce_motion = menu.addAction("Kurangi gerakan")
+        self.action_reduce_motion.setCheckable(True)
+        self.action_reduce_motion.setChecked(self.theme.reduce_motion)
+        self.action_reduce_motion.toggled.connect(self.theme.set_reduce_motion)
+        self.view_button.setMenu(menu)
+        header.addWidget(self.view_button)
+
+    def set_theme(self, name: str) -> None:
+        self.theme.set_theme(name)
+
+    def _on_theme_changed(self, tokens):
+        self.root.setStyleSheet(self.theme.qss())
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            app.setPalette(build_palette(tokens))
+        self.action_light.setChecked(tokens.name == "light")
+        self.action_dark.setChecked(tokens.name == "dark")
 
     # ---- building blocks -------------------------------------------------
     @staticmethod
@@ -202,28 +230,44 @@ class EngineeringWindow(QtWidgets.QMainWindow):
         return body
 
     @staticmethod
-    def _button(text, slot, *, primary=False):
+    def _button(text, slot, *, primary=False, name=""):
         button = QtWidgets.QPushButton(text)
-        if primary:
-            button.setObjectName("primary")
+        if primary or name:
+            button.setObjectName(name or "primary")
         button.clicked.connect(slot)
         return button
 
     # ---- screen 1: Welcome -------------------------------------------------
     def _welcome(self):
-        page = self._page("Welcome", self.screens)
-        page.addWidget(_label("Set up a UDP session, watch a live PREVIEW of the 16 channels and "
-                              "optionally archive the original RAW datagrams. Use the local RAW fake "
-                              "to practise offline."))
-        page.addWidget(_label("Setup has four steps: Device (connection and ENGINEERING), MBLL, "
-                              "Short separation and Session (recording). Opening the Live panel "
-                              "sends no START."))
-        page.addWidget(_label(PREVIEW_LABEL + "\nHb and OD views are a preview computed on the host "
-                              "from RAW counts. They are changes from a baseline (Δ), not absolute "
-                              "values. The RAW recording is never modified by the preview."))
+        page = self._page("", self.screens)
+        page.addWidget(_label("NoctiNIRS 2 Host", "title"))
+        page.addWidget(_label("RAW ENGINEERING · sesi UDP · pratinjau Hb langsung · rekaman RAW otomatis",
+                              "subtitle"))
+        cards = QtWidgets.QHBoxLayout()
+        cards.setSpacing(T.SPACE_M)
+        page.addLayout(cards)
+        for title, text in (
+                ("1 · Setup bertahap", "Device (koneksi dan ENGINEERING), MBLL, Short separation, dan "
+                                       "Session (rekaman). Back/Continue mempertahankan isian Anda."),
+                ("2 · Live", "Satu baris per channel, ΔHbO dan ΔHbR dalam satu grafik, tiga baris "
+                             "terlihat sekaligus. Membuka panel Live tidak mengirim START."),
+                ("3 · Rekaman", "File RAW tersimpan otomatis di Documents\\noctinirs\\<tanggal> sebagai "
+                                "record_X, tanpa menimpa. Preview tidak mengubah file RAW.")):
+            card = QtWidgets.QFrame()
+            card.setObjectName("card")
+            card.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Maximum)
+            card.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+            col = QtWidgets.QVBoxLayout(card)
+            col.setContentsMargins(T.SPACE_M, T.SPACE_M, T.SPACE_M, T.SPACE_M)
+            col.addWidget(_label(title, "sectiontitle"))
+            col.addWidget(_label(text, "muted"))
+            col.addStretch()
+            cards.addWidget(card, 1)
+        page.addWidget(_label(PREVIEW_LABEL + ". Tampilan Hb dan OD dihitung host dari hitungan RAW. "
+                              "Nilainya perubahan dari baseline (Δ), bukan nilai mutlak.", "previewbanner"))
         self.welcome_geometry = _label(
             f"Geometry map {self.geometry.geometry_map_id} · status {self.geometry.status}"
-            + (" · DRAFT: distances and channel mapping are not final." if self.geometry.is_draft else ""))
+            + (" · DRAFT: jarak dan pemetaan channel belum final." if self.geometry.is_draft else ""), "muted")
         page.addWidget(self.welcome_geometry)
 
     # ---- screen 2: staged Setup --------------------------------------------
@@ -241,7 +285,7 @@ class EngineeringWindow(QtWidgets.QMainWindow):
             chips.addWidget(chip)
             self.chips.append(chip)
         chips.addStretch()
-        self.setup_steps = QtWidgets.QStackedWidget()
+        self.setup_steps = FadeStack(self.theme)
         col.addWidget(self.setup_steps, 1)
         self._device_step()
         self._mbll_step()
@@ -324,14 +368,14 @@ class EngineeringWindow(QtWidgets.QMainWindow):
         col.addStretch()
         row.addLayout(col)
         page.addLayout(row)
-        self.next_file = AutoText(min_lines=2)
+        self.next_file = AutoText(min_lines=1)
         page.addWidget(self.next_file)
         form = QtWidgets.QFormLayout()
         page.addLayout(form)
         self.firmware = QtWidgets.QLineEdit()
         self.firmware.setPlaceholderText("Optional · 40 hexadecimal characters")
         form.addRow("Operator-provided firmware SHA", self.firmware)
-        self.identity = AutoText(min_lines=2)
+        self.identity = AutoText(min_lines=1)
         page.addWidget(self.identity)
         page.addWidget(_label("Readiness"))
         self.summary = AutoText(min_lines=4)
@@ -339,63 +383,74 @@ class EngineeringWindow(QtWidgets.QMainWindow):
 
     # ---- screen 3: Live ------------------------------------------------------
     def _live(self):
-        """Left: narrow, scrollable settings and controls. Right: the graphs, as large as the window
-        allows. A splitter lets the operator move the divider; nothing has a fixed size."""
+        """Top: an action bar that never collapses (START, STOP, SAFE_OFF, Disconnect). Below it a settings
+        panel (left, foldable sections, collapsible) and the stacked channel rows (right)."""
+        page = QtWidgets.QWidget()
+        outer = QtWidgets.QVBoxLayout(page)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(T.SPACE_S)
+        bar = QtWidgets.QFrame()
+        bar.setObjectName("card")
+        bar.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+        row = QtWidgets.QHBoxLayout(bar)
+        row.setContentsMargins(T.SPACE_M, T.SPACE_S, T.SPACE_M, T.SPACE_S)
+        row.setSpacing(T.SPACE_S)
+        self.start_button = self._button("Start acquisition", self._start, primary=True)
+        self.stop_button = self._button("Stop acquisition", lambda: self._submit("stop"), name="danger")
+        self.panel_disconnect = self._button("Disconnect", self._disconnect)
+        for b in (self.start_button, self.stop_button, self.panel_disconnect):
+            row.addWidget(b)
+        row.addStretch()
+        self._add_recovery(row)
+        outer.addWidget(bar)
+
         split = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
         split.setChildrenCollapsible(False)
         split.setObjectName("livesplit")
-        self.screens.addWidget(self._scroll(split))
+        outer.addWidget(split, 1)
         self.live_split = split
 
         side_widget = QtWidgets.QWidget(objectName="page")
         side = QtWidgets.QVBoxLayout(side_widget)
-        side.setContentsMargins(8, 6, 8, 6)
+        side.setContentsMargins(T.SPACE_S, T.SPACE_S, T.SPACE_S, T.SPACE_S)
         side.setSpacing(2)
 
         def block(title, expanded=True):
             body = QtWidgets.QWidget()
             lay = QtWidgets.QVBoxLayout(body)
             lay.setContentsMargins(0, 0, 0, 0)
-            lay.setSpacing(4)
-            sec = Section(title, body, expanded=expanded)
+            lay.setSpacing(T.SPACE_S // 2)
+            sec = Section(title, body, expanded=expanded, theme=self.theme)
             side.addWidget(sec)
             return lay, sec
 
-        lay, self.section_session = block("Sesi dan kontrol")
+        lay, self.section_session = block("Sesi dan status")
         self.device = AutoText(min_lines=3)
         lay.addWidget(self.device)
-        grid = QtWidgets.QGridLayout()
-        lay.addLayout(grid)
-        self.start_button = self._button("Start acquisition", self._start, primary=True)
-        self.stop_button = self._button("Stop acquisition", lambda: self._submit("stop"))
         self.diag_button = self._button("Refresh diagnostics", lambda: self._submit("diagnostics"))
-        self.panel_disconnect = self._button("Disconnect", self._disconnect)
-        grid.addWidget(self.start_button, 0, 0)
-        grid.addWidget(self.stop_button, 0, 1)
-        grid.addWidget(self.diag_button, 1, 0)
-        grid.addWidget(self.panel_disconnect, 1, 1)
-        self._recovery_row(lay)
+        lay.addWidget(self.diag_button)
         self.recording = AutoText(min_lines=2)
         lay.addWidget(self.recording)
         self.loss_label = AutoText(min_lines=2)
         lay.addWidget(self.loss_label)
 
-        self.panel = PreviewPanel(self.geometry)
+        self.panel = PreviewPanel(self.geometry, self.theme)
         self.panel.detail_changed.connect(self._show_detail)
+        self.panel.sidebar_toggle_requested.connect(self.toggle_sidebar)
         lay, self.section_display = block("Tampilan")
         lay.addWidget(self.panel.controls)
 
         lay, self.section_preview = block("Pratinjau: DPF, SCR, baseline")
         self.live_form = PreviewSettingsForm(("mbll", "ssr"), self.preview_cfg)
         lay.addWidget(self.live_form)
-        row = QtWidgets.QHBoxLayout()
+        buttons = QtWidgets.QHBoxLayout()
         self.apply_live_button = self._button("Apply live settings", self._apply_live, primary=True)
         self.reset_baseline_button = self._button("Reset baseline", lambda: self._submit("reset_preview_baseline"))
-        row.addWidget(self.apply_live_button)
-        row.addWidget(self.reset_baseline_button)
-        lay.addLayout(row)
+        buttons.addWidget(self.apply_live_button)
+        buttons.addWidget(self.reset_baseline_button)
+        lay.addLayout(buttons)
 
-        lay, self.section_detail = block("Detail channel (klik plot atau chip short)")
+        lay, self.section_detail = block("Detail channel (klik baris)")
         self.detail = AutoText(min_lines=12)
         lay.addWidget(self.detail)
 
@@ -415,14 +470,71 @@ class EngineeringWindow(QtWidgets.QMainWindow):
 
         side_scroll = self._scroll(side_widget)
         side_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        side_scroll.setMinimumWidth(300)
-        side_scroll.setMaximumWidth(480)
+        side_scroll.setMinimumWidth(SIDEBAR_MIN)
+        side_scroll.setMaximumWidth(SIDEBAR_MAX)
         self.side_scroll = side_scroll
+        self.sidebar_open = True
+        self._side_anim = None
         split.addWidget(side_scroll)
         split.addWidget(self.panel)
         split.setStretchFactor(0, 0)
         split.setStretchFactor(1, 1)
-        split.setSizes([340, 960])
+        split.setSizes([SIDEBAR_W, 960])
+        wrapper = self._scroll(page)
+        wrapper.fade_target = side_scroll      # only the settings panel fades in; the graphs never animate
+        self.screens.addWidget(wrapper)
+
+    @property
+    def sidebar_animating(self) -> bool:
+        return self._side_anim is not None and self._side_anim.state() == QtCore.QAbstractAnimation.State.Running
+
+    def toggle_sidebar(self) -> None:
+        """Collapse or restore the settings panel. START/STOP live in the action bar, so they stay."""
+        opening = not self.sidebar_open
+        self.sidebar_open = opening
+        self.panel.collapse_button.setText("◀  Panel" if opening else "▶  Panel")
+        if self._side_anim is not None:
+            self._side_anim.stop()
+        scroll, ms = self.side_scroll, self.theme.ms(200)
+
+        def settle():
+            if opening:
+                scroll.setMinimumWidth(SIDEBAR_MIN)
+                scroll.setMaximumWidth(SIDEBAR_MAX)
+            else:
+                scroll.setVisible(False)
+
+        if opening:
+            scroll.setVisible(True)
+            scroll.setMinimumWidth(0)
+            if ms == 0:
+                settle()
+                return
+            start = scroll.width() if scroll.maximumWidth() < SIDEBAR_MAX else 0
+            scroll.setMaximumWidth(start)
+            end = SIDEBAR_W
+        else:
+            scroll.setMinimumWidth(0)
+            if ms == 0:
+                settle()
+                return
+            start, end = scroll.width(), 0
+            scroll.setMaximumWidth(start)
+        anim = QtCore.QPropertyAnimation(scroll, b"maximumWidth", self)
+        anim.setStartValue(start)
+        anim.setEndValue(end)
+        anim.setDuration(ms)
+        anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+        anim.finished.connect(settle)
+        anim.start()
+        self._side_anim = anim
+
+    def _add_recovery(self, row):
+        check = self._button("Check START outcome", lambda: self._submit("check_start_outcome"))
+        safe = self._button("SAFE_OFF…", self._safe_off)
+        row.addWidget(check)
+        row.addWidget(safe)
+        self._recovery_buttons.append((check, safe))
 
     def _recovery_row(self, page):
         row = QtWidgets.QHBoxLayout()
@@ -541,7 +653,7 @@ class EngineeringWindow(QtWidgets.QMainWindow):
         self.flat = flat
         screen = 0 if flat == 0 else (2 if flat == 5 else 1)
         self.screens.setCurrentIndex(screen)
-        self.step.setVisible(flat != 5)
+        self.step.setVisible(False)
         if screen == 1:
             self.setup_steps.setCurrentIndex(flat - 1)
         if flat == 5:
@@ -675,10 +787,31 @@ class EngineeringWindow(QtWidgets.QMainWindow):
         if self.battery_label.text() != info.text:
             self.battery_label.setText(info.text)
         self.battery_label.setToolTip(info.tooltip)
-        if self.battery_label.property("level") != info.level:
-            self.battery_label.setProperty("level", info.level)
-            self.battery_label.style().unpolish(self.battery_label)
-            self.battery_label.style().polish(self.battery_label)
+        self.battery_label.set_tone({"low": "warn", "problem": "warn"}.get(info.level, "neutral"))
+        self._render_status_chips()
+
+    def _render_status_chips(self):
+        s = self.state
+        if s.get("start_uncertain"):
+            text, tone = "START tidak pasti", "danger"
+        elif s.get("connected"):
+            text, tone = f"Terhubung · {s.get('device_state', '')}", "ok"
+        else:
+            text, tone = "Tidak terhubung", "neutral"
+        if self.connection_chip.text() != text:
+            self.connection_chip.setText(text)
+        self.connection_chip.set_tone(tone)
+        rec = s.get("recording", "IDLE")
+        path = s.get("recording_path")
+        stem = Path(str(path)).name.split(".")[0] if path else ""
+        text = f"Rekaman · {rec}" + (f" · {stem}" if stem and rec in ("RECORDING", "ARMED") else "")
+        tone = {"RECORDING": "danger", "ARMED": "warn", "OPENING": "warn", "FINALIZING": "warn",
+                "FINALIZED": "ok", "INCOMPLETE / ERROR": "danger"}.get(rec, "neutral")
+        if rec == "IDLE":
+            text = "Rekaman · tidak aktif"
+        if self.recording_chip.text() != text:
+            self.recording_chip.setText(text)
+        self.recording_chip.set_tone(tone)
 
     def _sync_destination(self):
         """Ask the worker which record_X the next START would use (no files created)."""
@@ -836,6 +969,7 @@ def main(argv=None):
     if args.host_sha is not None and not re.fullmatch(r"[a-fA-F0-9]{40}", args.host_sha):
         parser.error("--host-sha must contain 40 hexadecimal characters")
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([sys.argv[0]])
+    app.setStyle("Fusion")      # one consistent base style under the generated style sheet
     window = EngineeringWindow(load_geometry(geometry_path()), args.host_sha)
     window.show()
     code = app.exec()

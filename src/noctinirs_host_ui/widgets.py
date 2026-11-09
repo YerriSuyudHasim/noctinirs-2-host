@@ -51,32 +51,297 @@ class AutoText(QtWidgets.QTextEdit):
         return int(self.document().size().height()) <= self.height()
 
 
-class Section(QtWidgets.QWidget):
-    """A titled block of the left panel that can be folded away."""
+class ElidedLabel(QtWidgets.QLabel):
+    """One line of text, elided with an ellipsis when it does not fit; the full text is the tooltip."""
 
-    def __init__(self, title: str, content: QtWidgets.QWidget, *, expanded: bool = True, parent=None):
+    def __init__(self, text: str = "", parent=None) -> None:
+        super().__init__(parent)
+        self._full = ""
+        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Preferred)
+        self.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        self.setText(text)
+
+    def setText(self, text: str) -> None:  # noqa: N802 (Qt name)
+        self._full = text
+        super().setText(text)
+        self._update_tip()
+        self.update()
+
+    def _update_tip(self) -> None:
+        tip = self._full if self.is_elided() else ""
+        if self.toolTip() != tip:
+            self.setToolTip(tip)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt name)
+        super().resizeEvent(event)
+        self._update_tip()
+
+    def showEvent(self, event) -> None:  # noqa: N802 (Qt name)
+        super().showEvent(event)
+        self._update_tip()
+
+    def full_text(self) -> str:
+        return self._full
+
+    def is_elided(self) -> bool:
+        avail = self.contentsRect().width() - 2 * self.margin()
+        return self.fontMetrics().horizontalAdvance(self._full) > max(avail, 0)
+
+    def minimumSizeHint(self) -> QtCore.QSize:
+        return QtCore.QSize(40, super().minimumSizeHint().height())
+
+    def sizeHint(self) -> QtCore.QSize:
+        return QtCore.QSize(self.fontMetrics().horizontalAdvance(self._full) + 2 * self.margin() + 4,
+                            super().sizeHint().height())
+
+    def paintEvent(self, event) -> None:
+        painter = QtGui.QPainter(self)
+        # the background and frame come from the style sheet, then the elided text
+        opt = QtWidgets.QStyleOption()
+        opt.initFrom(self)
+        self.style().drawPrimitive(QtWidgets.QStyle.PrimitiveElement.PE_Widget, opt, painter, self)
+        rect = self.contentsRect().adjusted(self.margin(), 0, -self.margin(), 0)
+        shown = self.fontMetrics().elidedText(self._full, QtCore.Qt.TextElideMode.ElideRight, rect.width())
+        painter.setPen(self.palette().color(QtGui.QPalette.ColorRole.WindowText))
+        painter.drawText(rect, int(self.alignment()) | int(QtCore.Qt.AlignmentFlag.AlignVCenter), shown)
+
+
+class StatusChip(QtWidgets.QLabel):
+    """A rounded status pill. Its colour follows a tone and changes with a short animation."""
+
+    TONES = ("neutral", "ok", "warn", "danger", "accent")
+
+    def __init__(self, text: str = "", theme=None, parent=None) -> None:
+        super().__init__(text, parent)
+        self.setObjectName("statuschip")
+        self._theme = theme
+        self._tone = "neutral"
+        self._bg = QtGui.QColor()
+        self._border = QtGui.QColor()
+        self._anim: QtCore.QVariantAnimation | None = None
+        self.setContentsMargins(12, 5, 12, 5)
+        self.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        self.setWordWrap(True)
+        self._apply(animate=False)
+        if theme is not None:
+            theme.changed.connect(lambda _t: self._apply(animate=False))
+
+    @property
+    def tone(self) -> str:
+        return self._tone
+
+    @property
+    def animating(self) -> bool:
+        return self._anim is not None and self._anim.state() == QtCore.QAbstractAnimation.State.Running
+
+    def set_tone(self, tone: str) -> None:
+        if tone not in self.TONES:
+            raise ValueError(tone)
+        if tone != self._tone:
+            self._tone = tone
+            self._apply(animate=True)
+
+    def _colors(self):
+        if self._theme is not None:
+            t = self._theme.tokens
+        else:
+            from .design.tokens import LIGHT as t  # noqa: N811
+        return {"neutral": (t.surface, t.text_primary, t.border),
+                "ok": (t.success_bg, t.success, t.success),
+                "warn": (t.warning_bg, t.warning, t.warning),
+                "danger": (t.danger_bg, t.danger, t.danger),
+                "accent": (t.accent, t.accent_text, t.accent)}[self._tone]
+
+    def _apply(self, *, animate: bool) -> None:
+        bg, fg, border = (QtGui.QColor(c) for c in self._colors())
+        self.setStyleSheet(f"QLabel#statuschip {{ color: {fg.name()}; background: transparent; border: 0; }}")
+        self._border = border
+        ms = self._theme.ms(150) if self._theme is not None else 0
+        if self._anim is not None:
+            self._anim.stop()
+            self._anim = None
+        if not animate or ms == 0 or not self.isVisible() or not self._bg.isValid():
+            self._bg = bg
+            self.update()
+            return
+        anim = QtCore.QVariantAnimation(self)
+        anim.setStartValue(self._bg)
+        anim.setEndValue(bg)
+        anim.setDuration(ms)
+        anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+        anim.valueChanged.connect(self._step)
+        anim.start()
+        self._anim = anim
+
+    def _step(self, value) -> None:
+        self._bg = QtGui.QColor(value)
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        rect = QtCore.QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        painter.setPen(QtGui.QPen(self._border))
+        painter.setBrush(self._bg)
+        painter.drawRoundedRect(rect, 10, 10)
+        painter.end()
+        super().paintEvent(event)
+
+
+class Section(QtWidgets.QWidget):
+    """A titled block that folds away. The height change is animated unless motion is reduced."""
+
+    def __init__(self, title: str, content: QtWidgets.QWidget, *, expanded: bool = True, theme=None,
+                 parent=None) -> None:
         super().__init__(parent)
         self.content = content
+        self._theme = theme
+        self._anim: QtCore.QPropertyAnimation | None = None
         self.button = QtWidgets.QToolButton()
         self.button.setText(title)
         self.button.setCheckable(True)
         self.button.setChecked(expanded)
         self.button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.button.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
-        self.button.setStyleSheet("QToolButton { text-align: left; font-weight: bold; border: 0; "
-                                  "border-bottom: 1px solid #cfe0ef; padding: 4px 2px; }")
+        self.button.setStyleSheet("QToolButton { text-align: left; font-weight: 600; }")
         self.button.toggled.connect(self._toggled)
         lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(0, 2, 0, 2)
-        lay.setSpacing(2)
+        lay.setSpacing(4)
         lay.addWidget(self.button)
         lay.addWidget(content)
-        self._toggled(expanded)
+        self._set_arrow(expanded)
+        content.setVisible(expanded)
+
+    @property
+    def animating(self) -> bool:
+        return self._anim is not None and self._anim.state() == QtCore.QAbstractAnimation.State.Running
+
+    def _set_arrow(self, on: bool) -> None:
+        self.button.setArrowType(QtCore.Qt.ArrowType.DownArrow if on else QtCore.Qt.ArrowType.RightArrow)
 
     def _toggled(self, on: bool) -> None:
-        self.button.setArrowType(QtCore.Qt.ArrowType.DownArrow if on else QtCore.Qt.ArrowType.RightArrow)
-        self.content.setVisible(on)
+        self._set_arrow(on)
+        if self._anim is not None:
+            self._anim.stop()
+            self._anim = None
+        ms = self._theme.ms(200) if self._theme is not None else 0
+        if ms == 0 or not self.isVisible():
+            self.content.setMaximumHeight(16777215)
+            self.content.setVisible(on)
+            return
+        start = self.content.height() if self.content.isVisible() else 0
+        if on:
+            self.content.setMaximumHeight(0)
+            self.content.setVisible(True)
+            end = max(self.content.sizeHint().height(), 1)
+        else:
+            end = 0
+        anim = QtCore.QPropertyAnimation(self.content, b"maximumHeight", self)
+        anim.setStartValue(start)
+        anim.setEndValue(end)
+        anim.setDuration(ms)
+        anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+
+        def done():
+            self.content.setMaximumHeight(16777215)
+            self.content.setVisible(on)
+
+        anim.finished.connect(done)
+        anim.start()
+        self._anim = anim
 
     @property
     def expanded(self) -> bool:
         return self.button.isChecked()
+
+
+class SmoothScrollArea(QtWidgets.QScrollArea):
+    """A vertical scroll area whose mouse wheel eases to its target (only the scroll position moves)."""
+
+    def __init__(self, theme=None, parent=None) -> None:
+        super().__init__(parent)
+        self._theme = theme
+        self._target = 0
+        self._anim: QtCore.QPropertyAnimation | None = None
+        self.setWidgetResizable(True)
+        self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.verticalScrollBar().setSingleStep(48)
+
+    def scroll_to(self, value: int) -> None:
+        bar = self.verticalScrollBar()
+        value = max(bar.minimum(), min(bar.maximum(), int(value)))
+        self._target = value
+        ms = self._theme.ms(180) if self._theme is not None else 0
+        if self._anim is not None:
+            self._anim.stop()
+        if ms == 0 or not self.isVisible():
+            bar.setValue(value)
+            return
+        anim = QtCore.QPropertyAnimation(bar, b"value", self)
+        anim.setStartValue(bar.value())
+        anim.setEndValue(value)
+        anim.setDuration(ms)
+        anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+        anim.start()
+        self._anim = anim
+
+    def wheelEvent(self, event) -> None:
+        bar = self.verticalScrollBar()
+        delta = event.angleDelta().y()
+        if delta == 0 or bar.maximum() == 0:
+            event.ignore()
+            return
+        running = self._anim is not None and self._anim.state() == QtCore.QAbstractAnimation.State.Running
+        base = self._target if running else bar.value()
+        self.scroll_to(base - int(delta / 120 * 3 * bar.singleStep()))
+        event.accept()
+
+
+class FadeStack(QtWidgets.QStackedWidget):
+    """A stacked widget whose pages fade in (200 ms). A page may name a smaller `fade_target`: the
+    Live page does, so the graphs themselves never animate. Reduce motion switches instantly."""
+
+    def __init__(self, theme=None, parent=None) -> None:
+        super().__init__(parent)
+        self._theme = theme
+        self._anim: QtCore.QPropertyAnimation | None = None
+        self._target: QtWidgets.QWidget | None = None
+        self.transitions_started = 0
+
+    @property
+    def animating(self) -> bool:
+        return self._anim is not None and self._anim.state() == QtCore.QAbstractAnimation.State.Running
+
+    def setCurrentIndex(self, index: int) -> None:  # noqa: N802 (Qt name)
+        same = index == self.currentIndex()
+        super().setCurrentIndex(index)
+        ms = self._theme.ms(200) if self._theme is not None else 0
+        if same or ms == 0 or not self.isVisible():
+            return
+        page = self.widget(index)
+        target = getattr(page, "fade_target", page)
+        self._finish()
+        effect = QtWidgets.QGraphicsOpacityEffect(target)
+        effect.setOpacity(0.0)
+        target.setGraphicsEffect(effect)
+        anim = QtCore.QPropertyAnimation(effect, b"opacity", self)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setDuration(ms)
+        anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+        anim.finished.connect(self._finish)
+        anim.start()
+        self._anim, self._target = anim, target
+        self.transitions_started += 1
+
+    def _finish(self) -> None:
+        if self._anim is not None:
+            self._anim.stop()
+            self._anim = None
+        if self._target is not None:
+            try:
+                self._target.setGraphicsEffect(None)
+            except RuntimeError:
+                pass
+            self._target = None
