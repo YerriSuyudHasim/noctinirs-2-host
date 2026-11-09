@@ -5,8 +5,11 @@ from __future__ import annotations
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import date
+import json
 from pathlib import Path
 import re
+import sys
 import time
 
 from .control.engineering_fake import EngineeringFake
@@ -14,6 +17,8 @@ from .control.protocol import ST_SAFE_OFF, ST_STARTING, ST_STOPPED, ST_STREAMING
 from .control.session import LoopbackTransport, SessionController
 from .control.udp import UDPTransport
 from .geometry import Geometry
+from .preview.params import PreviewConfig
+from .preview.pipeline import PreviewPipeline
 from .record.continuity import RawContinuity
 from .record.writer import Recorder
 from .wire.envelope import parse_envelope
@@ -21,6 +26,42 @@ from .wire.optical import parse_raw
 
 UNKNOWN = "Unknown / unavailable"
 STOP_WAIT_S = 5.0
+RECORD_STEM = "record_"
+_RECORD_FILE = re.compile(r"^record_(\d+)(\.json|\.csv|\.raw\.bin|\.raw\.csv|\.preview\.json)$")
+
+
+def documents_dir() -> Path:
+    """The user's Documents folder (honours Windows folder redirection)."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes
+            guid = (ctypes.c_byte * 16).from_buffer_copy(
+                bytes.fromhex("d0 9a d3 fd 8f 23 af 46 ad b4 6c 85 48 03 69 c7".replace(" ", "")))
+            out = ctypes.c_wchar_p()
+            if ctypes.windll.shell32.SHGetKnownFolderPath(ctypes.byref(guid), 0, None,
+                                                          ctypes.byref(out)) == 0:
+                path = Path(out.value)
+                ctypes.windll.ole32.CoTaskMemFree(out)
+                return path
+        except (OSError, AttributeError, ValueError):
+            pass
+    return Path.home() / "Documents"
+
+
+def default_recording_folder(documents: Path | None = None, today: date | None = None) -> Path:
+    """Documents/noctinirs/<YYYY-MM-DD>. Not created here."""
+    return (documents or documents_dir()) / "noctinirs" / (today or date.today()).isoformat()
+
+
+def next_record_number(folder: Path) -> int:
+    """1 for an empty folder, else highest existing record_X plus one. Never reuses a number."""
+    highest = 0
+    for entry in folder.iterdir():
+        m = _RECORD_FILE.match(entry.name)
+        if m:
+            highest = max(highest, int(m.group(1)))
+    return highest + 1
 
 
 @dataclass(frozen=True)
@@ -43,6 +84,17 @@ class RecordingTarget:
             raise ValueError("Operator firmware SHA must be empty or 40 hexadecimal characters.")
         return cls(path, name, firmware_sha or None)
 
+    @classmethod
+    def prepare(cls, folder: str, firmware_sha: str = "") -> RecordingTarget:
+        """Create the folder if needed and choose the next record_X stem (blocking disk work)."""
+        path = Path(folder)
+        if folder != folder.strip() or not folder or not path.is_absolute():
+            raise ValueError("Enter an absolute recording folder with no surrounding whitespace.")
+        path.mkdir(parents=True, exist_ok=True)
+        target = cls.parse(folder, f"{RECORD_STEM}{next_record_number(path)}", firmware_sha)
+        target.check()
+        return target
+
     def check(self) -> None:
         if not self.folder.is_dir():
             raise ValueError("Choose an existing recording folder.")
@@ -56,8 +108,22 @@ class EngineeringRun:
     """Runs on the session worker, including all control transactions and callbacks."""
 
     def __init__(self, geometry: Geometry, host_sha: str | None = None, *,
-                 controller_factory=SessionController, recorder_factory=Recorder) -> None:
+                 controller_factory=SessionController, recorder_factory=Recorder,
+                 fake_options: dict | None = None) -> None:
         self.geometry = geometry
+        self.fake_options = dict(fake_options or {})
+        self.preview_config = PreviewConfig()
+        self.preview: PreviewPipeline | None = None
+        self.preview_active = False
+        self.preview_errors = 0
+        self.preview_epoch = 0
+        self._preview_out: list = []
+        self._preview_log: list = []
+        self._auto: tuple | None = None
+        self._auto_wait: tuple | None = None
+        self._auto_finalize = False
+        self.destination_note = ""
+        self.recording_wanted = True
         self.host_sha = host_sha
         self._controller_factory = controller_factory
         self._recorder_factory = recorder_factory
@@ -116,7 +182,7 @@ class EngineeringRun:
         if self.connected or self._closing is not None or self.recorder is not None:
             raise ValueError("Finish disconnecting and closing the recorder before connecting.")
         if fake:
-            transport = LoopbackTransport(EngineeringFake(geometry=self.geometry))
+            transport = LoopbackTransport(EngineeringFake(geometry=self.geometry, **self.fake_options))
             endpoint = "Local RAW fake (in-process loopback)"
         else:
             if not re.fullmatch(r"[0-9]{1,5}", port):
@@ -214,7 +280,8 @@ class EngineeringRun:
             target.folder, self.geometry, name=target.name, record_raw=True,
             simulated=ctl.simulated, host_sha=self.host_sha, firmware_sha=target.firmware_sha,
             observed_info=context["observed_info"], boot_id=ctl.boot_id,
-            settings=lambda: {**context["config"], "device_state": context["device_state"]},
+            settings=lambda: {**context["config"], "device_state": context["device_state"],
+                              "preview": self.preview_config.to_metadata()},
         )
         self.recording_path = self.recorder.json_path
         self._last_recording_meta = None
@@ -236,6 +303,10 @@ class EngineeringRun:
             raise ValueError("Settings changed since arming. Finalize and arm a new recording.")
         self.raw = RawContinuity()
         self.latest_raw = {}
+        self._end_preview("new START")
+        self.preview_epoch += 1
+        self.preview = PreviewPipeline(self.geometry, self.preview_config,
+                                       self.controller.settings.fs_hz or 10)
         result = self.controller.start()
         if self.controller.start_uncertain:
             self.configured = False
@@ -249,10 +320,52 @@ class EngineeringRun:
                 self.recorder.event("cleanup", message)
                 self._finalize(context)
             return
+        if result.ok:
+            self.preview_active = True
         if result.ok and self.recorder is not None:
             self.recording_used = True
             self.recorder_state = "RECORDING"
         self._check_mutation(result)
+
+    def start_recorded(self, folder: str, firmware_sha: str = "") -> None:
+        """START with automatic RAW recording: folder + next record_X, arm, then START.
+
+        Every step after the destination work happens from `_poll_disk` on this same worker."""
+        self._require_ready()
+        if self.recorder is not None:
+            raise ValueError("Wait for the recorder or finalize the previous recording.")
+        folder = folder.strip()
+        RecordingTarget.parse(folder, "record_1", firmware_sha)  # validate input on the caller
+        self._auto_wait = (folder, firmware_sha)  # a housekeeping disk job may still be running
+        self._launch_auto()
+
+    def _launch_auto(self) -> None:
+        if self._auto_wait is None or self._job is not None:
+            return
+        folder, firmware_sha = self._auto_wait
+        self._auto_wait = None
+        try:
+            self._require_ready()
+        except ValueError as exc:
+            self.fail(str(exc))
+            return
+        self._auto = (folder, firmware_sha)
+        self.checked_target = None
+        self._job = self._disk.submit(RecordingTarget.prepare, folder, firmware_sha)
+
+    def preview_destination(self, folder: str, firmware_sha: str = "") -> None:
+        """Tell the operator which record_X the next START would use (no files created)."""
+        if self._job is not None or self.recorder is not None:
+            return
+        folder = folder.strip()
+        RecordingTarget.parse(folder, "record_1", firmware_sha)
+        self._job = self._disk.submit(self._peek, folder)
+
+    @staticmethod
+    def _peek(folder: str) -> str:
+        path = Path(folder)
+        number = next_record_number(path) if path.is_dir() else 1
+        return f"{path / (RECORD_STEM + str(number))}"
 
     def check_start_outcome(self) -> None:
         if self.controller is None:
@@ -309,7 +422,69 @@ class EngineeringRun:
         ctl = self.controller
         ctl.listeners.remove(self.recorder.on_controller_event)
         self.recorder_state = "FINALIZING"
-        self._job = self._disk.submit(self.recorder.stop, raw_context=context)
+        self._end_preview("recording finalized")
+        provenance = self.preview.provenance() if self.preview is not None else None
+        self._job = self._disk.submit(self._stop_recorder, self.recorder, context, provenance)
+
+    @staticmethod
+    def _stop_recorder(recorder: Recorder, context: dict | None, provenance: dict | None) -> bool:
+        ok = recorder.stop(raw_context=context)
+        if provenance is not None:
+            # Derived-parameter provenance goes to its own file; the RAW archive is never touched.
+            path = recorder.folder / f"{recorder.stem}.preview.json"
+            try:
+                with open(path, "x", encoding="utf-8") as fh:
+                    json.dump(provenance, fh, indent=2, default=str)
+            except OSError:
+                return False
+        return ok
+
+    # ---- PREVIEW (never affects RAW recording) ----------------------------
+    def set_preview_config(self, config: PreviewConfig) -> None:
+        config.validate()
+        self.preview_config = config
+        if self.preview is not None:
+            self.preview.configure(config)
+        if self.recorder is not None and self.recorder_state in ("ARMED", "RECORDING"):
+            self.recorder.event("preview_config", f"PREVIEW settings changed: ssr={config.ssr_mode} "
+                                f"dpf={config.dpf.mode} baseline_s={config.baseline_s} "
+                                "(full record in .preview.json)")
+        self._event("PREVIEW settings applied.")
+
+    def reset_preview_baseline(self) -> None:
+        if self.preview is None:
+            raise ValueError("No PREVIEW is running.")
+        self.preview.reset_baseline()
+        if self.recorder is not None and self.recorder_state in ("ARMED", "RECORDING"):
+            self.recorder.event("preview_baseline_reset", "PREVIEW baseline reset by operator")
+        self._event("PREVIEW baseline reset.")
+
+    def _preview_feed(self, raw, host_us: int) -> None:
+        if self.preview is None:
+            return
+        try:
+            self._preview_out.extend(self.preview.feed(raw, host_us))
+        except Exception:  # preview faults must not disturb capture or recording
+            self.preview_errors += 1
+
+    def _preview_gap(self, reason: str) -> None:
+        if self.preview is None or not self.preview_active:
+            return
+        try:
+            marker = self.preview.note_gap(reason)
+            self._preview_out.extend(self.preview.pending)
+            if marker is not None:
+                self._preview_out.append(marker)
+        except Exception:
+            self.preview_errors += 1
+
+    def _end_preview(self, reason: str) -> None:
+        if self.preview is not None and self.preview_active:
+            try:
+                self._preview_out.extend(self.preview.flush())
+            except Exception:
+                self.preview_errors += 1
+        self.preview_active = False
 
     def _capture(self, wire: bytes, host_us: int, boot_id: int | None) -> None:
         if self.recorder_state in ("ARMED", "RECORDING"):
@@ -320,6 +495,7 @@ class EngineeringRun:
         self.latest_raw = {"sample": raw.samples[-1], "first_device_us": env.timestamp_us,
                            "host_us": host_us, "estimated": env.ts_estimated,
                            "simulated": env.simulated, "epoch": raw.slot_plan_epoch}
+        self._preview_feed(raw, host_us)
 
     def disconnect(self) -> None:
         if self._closing is not None:
@@ -352,6 +528,8 @@ class EngineeringRun:
 
     def _lose_link(self, message: str) -> None:
         ctl = self.controller
+        self._preview_gap("link lost")
+        self._end_preview("link lost")
         self.fail(message)
         self._close_link(message, ctl.recording_snapshot() if ctl else None)
 
@@ -362,21 +540,40 @@ class EngineeringRun:
         try:
             result = job.result()
         except Exception as exc:
+            self._auto = None
             self.fail(f"Recording destination or writer error: {type(exc).__name__}: {exc}")
             if self.recorder is not None:
                 self.recorder_state = "INCOMPLETE / ERROR"
                 self.recorder = None
             return
-        if isinstance(result, RecordingTarget):
+        if isinstance(result, str):
+            self.destination_note = result
+        elif isinstance(result, RecordingTarget):
             self.checked_target = result
             self._note("Destination checked for existing files. Arming reserves files exclusively.")
+            if self._auto is not None:
+                try:
+                    self.arm(result)
+                except (ValueError, OSError) as exc:
+                    self._auto = None
+                    self.fail(str(exc))
         elif self.recorder_state == "OPENING":
             self.controller.listeners.append(self.recorder.on_controller_event)
             self.recorder_state = "ARMED"
             self._note(f"RAW recording armed: {self.recording_path}")
             if not self.connected or not self.stopped or self._closing is not None:
                 self.recorder.event("cleanup", self.cleanup or "Device no longer STOPPED while arming.")
+                self._auto = None
                 self._finalize(self._end_context)
+            elif self._auto is not None:
+                self._auto = None
+                try:
+                    self.start()
+                    self._auto_finalize = self.recording_used
+                except (ValueError, OSError) as exc:
+                    self.fail(str(exc))
+                    if self.recorder is not None and self.recorder_state == "ARMED"                             and not self.recording_used and self._job is None:
+                        self._finalize(self.controller.recording_snapshot())
         else:
             meta = self.recorder.metadata()
             self._last_recording_meta = meta["raw"]
@@ -408,7 +605,17 @@ class EngineeringRun:
                 self._finalize(ctl.recording_snapshot())
         if ctl:
             ctl.events.clear()  # Only this workflow's bounded log and recorder retain events.
+        if self.preview_active and self.stopped:
+            self._end_preview("session ended")
         self._poll_disk()
+        self._launch_auto()
+        if (self._auto_finalize and self.recorder_state in ("ARMED", "RECORDING") and self.stopped
+                and self.recording_used and self._job is None and self._closing is None):
+            self._auto_finalize = False
+            try:
+                self.finalize()
+            except (ValueError, OSError) as exc:
+                self.fail(str(exc))
         if self.recorder_state in ("ARMED", "RECORDING"):
             error = self.recorder.metadata()["writer_error"]
             if error:
@@ -437,6 +644,10 @@ class EngineeringRun:
                 if self._exit_requested:
                     self._disk.shutdown()
                     self.finished = True
+
+    def _drain_preview(self) -> list:
+        out, self._preview_out = self._preview_out, []
+        return out
 
     def snapshot(self) -> dict:
         ctl = self.controller
@@ -467,4 +678,10 @@ class EngineeringRun:
             "context": self.context, "host_counters": dict(ctl.counters) if ctl else {},
             "notice": self.notice, "error": self.error, "cleanup": self.cleanup,
             "log": tuple(self.log),
+            "preview_new": self._drain_preview(), "preview_errors": self.preview_errors,
+            "preview_active": self.preview_active, "preview_epoch": self.preview_epoch,
+            "preview_config": self.preview_config,
+            "preview_limits": self.preview.provenance()["limits"] if self.preview else (),
+            "destination_note": self.destination_note,
+            "geometry_draft": self.geometry.is_draft, "geometry_status": self.geometry.status,
         }

@@ -2,6 +2,7 @@
 
 import csv
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -459,8 +460,10 @@ while r.metadata()['raw']['persisted_archive']['packets'] != 1:
     time.sleep(.01)
 os._exit(0)
 """
+    src = str(Path(__file__).resolve().parents[1] / "src")
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, (src, os.environ.get("PYTHONPATH"))))}
     subprocess.run([sys.executable, "-c", code, str(tmp_path), str(GEOMETRY_PATH), wire().hex()],
-                   check=True, timeout=10)
+                   check=True, timeout=10, env=env)
     loaded = RawReplay(tmp_path / "capture.raw.bin")
     packet, = loaded
     assert packet.datagram() == wire() and (packet.host_rx_us, packet.observed_boot_id) == (25, 55)
