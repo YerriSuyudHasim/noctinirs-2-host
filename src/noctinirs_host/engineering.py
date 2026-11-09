@@ -13,7 +13,7 @@ import sys
 import time
 
 from .control.engineering_fake import EngineeringFake
-from .control.protocol import ST_SAFE_OFF, ST_STARTING, ST_STOPPED, ST_STREAMING
+from .control.protocol import ST_SAFE_OFF, ST_STARTING, ST_STOPPED, ST_STOPPING, ST_STREAMING
 from .control.session import LoopbackTransport, SessionController
 from .control.udp import UDPTransport
 from .geometry import Geometry
@@ -117,6 +117,7 @@ class EngineeringRun:
         self.preview_active = False
         self.preview_errors = 0
         self.preview_epoch = 0
+        self._preview_gap_sent = False
         self._preview_out: list = []
         self._preview_log: list = []
         self._auto: tuple | None = None
@@ -198,6 +199,7 @@ class EngineeringRun:
         ctl = self.controller = self._controller_factory(transport)
         ctl.listeners.append(lambda event: self._event(event.text))
         ctl.raw_capture_sink = self._capture
+        ctl.battery_enabled = True  # read-only query; never blocks or fails the connection
         self._result(ctl.connect())
         self.context = ctl.recording_snapshot()
         self._note(f"Connected to {endpoint}. Configure ENGINEERING before starting.")
@@ -305,6 +307,7 @@ class EngineeringRun:
         self.latest_raw = {}
         self._end_preview("new START")
         self.preview_epoch += 1
+        self._preview_gap_sent = False
         self.preview = PreviewPipeline(self.geometry, self.preview_config,
                                        self.controller.settings.fs_hz or 10)
         result = self.controller.start()
@@ -468,8 +471,9 @@ class EngineeringRun:
             self.preview_errors += 1
 
     def _preview_gap(self, reason: str) -> None:
-        if self.preview is None or not self.preview_active:
+        if self.preview is None or self._preview_gap_sent:
             return
+        self._preview_gap_sent = True  # one gap marker per run of the preview, clean or not
         try:
             marker = self.preview.note_gap(reason)
             self._preview_out.extend(self.preview.pending)
@@ -516,6 +520,7 @@ class EngineeringRun:
     def _close_link(self, message: str, context: dict | None) -> None:
         ctl = self.controller
         self._event(message)
+        self._preview_gap("disconnected")
         if ctl and self.recorder_state in ("ARMED", "RECORDING"):
             self.recorder.event("cleanup", message)
         if ctl:
@@ -605,6 +610,9 @@ class EngineeringRun:
                 self._finalize(ctl.recording_snapshot())
         if ctl:
             ctl.events.clear()  # Only this workflow's bounded log and recorder retain events.
+            for line in ctl.battery_log:  # session log only; never the recording sidecar
+                self._event(line)
+            ctl.battery_log.clear()
         if self.preview_active and self.stopped:
             self._end_preview("session ended")
         self._poll_disk()
@@ -645,6 +653,13 @@ class EngineeringRun:
                     self._disk.shutdown()
                     self.finished = True
 
+    def _battery_view(self) -> dict:
+        ctl = self.controller
+        if ctl is None or not ctl.connected:
+            return {"status": "DISCONNECTED", "connected": False}
+        return {**ctl.battery.snapshot(ctl._clock()), "connected": True,
+                "streaming": ctl.device_state in (ST_STARTING, ST_STREAMING, ST_STOPPING)}
+
     def _drain_preview(self) -> list:
         out, self._preview_out = self._preview_out, []
         return out
@@ -678,6 +693,7 @@ class EngineeringRun:
             "context": self.context, "host_counters": dict(ctl.counters) if ctl else {},
             "notice": self.notice, "error": self.error, "cleanup": self.cleanup,
             "log": tuple(self.log),
+            "battery": self._battery_view(),
             "preview_new": self._drain_preview(), "preview_errors": self.preview_errors,
             "preview_active": self.preview_active, "preview_epoch": self.preview_epoch,
             "preview_config": self.preview_config,

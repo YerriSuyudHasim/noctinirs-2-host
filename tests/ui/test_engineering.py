@@ -306,7 +306,7 @@ def test_disconnect_draws_a_gap(window):
     wait_for(lambda: w.panel.finite_points("CH1") > 3, seconds=15)
     w.panel_disconnect.click()
     wait_for(lambda: not w.state["connected"], seconds=15)
-    wait_for(lambda: any(math.isnan(v) for v in w.panel.series("CH1")[1][-5:]))
+    wait_for(lambda: all(math.isnan(v) for v in w.panel.series("CH1")[1][-1:]))  # explicit disconnect marker
 
 
 def test_udp_worker_timeout_keeps_gui_responsive_and_recovery_explicit(window, tmp_path, monkeypatch):
@@ -400,3 +400,56 @@ def test_recorder_open_error_is_reported_and_does_not_start(window, tmp_path):
     finally:
         peer.complete_stop()
         peer.close()
+
+
+# ---- battery indicator ------------------------------------------------------------------------
+
+def battery_text(w):
+    return w.battery_label.text()
+
+
+def test_battery_label_is_on_every_screen_and_updates(window):
+    w = fake_window(window)
+    assert w.battery_label.isVisible() and battery_text(w) == "Baterai —"       # Welcome, not connected
+    to_device(w)
+    wait_for(lambda: battery_text(w).startswith("Baterai 50,5 % · 3,99 V"))
+    texts = {1: battery_text(w)}
+    finish_device(w)
+    for step in (2, 3, 4):
+        w.next.click()
+        assert w.flat == step and w.battery_label.isVisible()
+        texts[step] = battery_text(w)
+    wait_for(lambda: "Ready to open the live panel" in w.summary.toPlainText() and w.next.isEnabled())
+    w.next.click()
+    assert w.flat == 5 and w.battery_label.isVisible()
+    assert all(t.startswith("Baterai 50,5 %") for t in texts.values())
+    shown = (battery_text(w) + w.battery_label.toolTip()).lower()
+    assert "charging" not in shown and "sedang mengisi" not in shown
+    assert "SIMULATED" in w.battery_label.toolTip()
+    screenshot(w, "battery-live-ok.png")
+    press_start(w)
+    wait_for(lambda: "nilai cache sebelum akuisisi" in battery_text(w))
+    w.stop_button.click()
+    wait_for(lambda: w.state["recording"] == "FINALIZED", seconds=15)
+    day = Path(w.folder_text())
+    text = "".join(p.read_text(errors="ignore") for p in day.glob("record_1.json"))
+    assert "battery" not in text.lower()                   # nothing about the battery in the sidecar
+    w.panel_disconnect.click()
+    wait_for(lambda: battery_text(w) == "Baterai —")
+
+
+@pytest.mark.parametrize("options, expected", [
+    (dict(battery=dict(valid=False, error=259)), "Baterai belum tersedia"),
+    (dict(battery=dict(valid=True, uv=3987000, mperm=48300, error=263)), "refresh gagal (263)"),
+    (dict(battery=dict(valid=True, uv=3987000, mperm=105250, error=0)), "105,2 %"),
+    (dict(battery_mode="old"), "Baterai: tidak didukung firmware ini"),
+    (dict(battery_mode="silent"), "Baterai: tidak ada jawaban"),
+])
+def test_battery_label_variants(window, options, expected):
+    w = fake_window(window, **options)
+    to_device(w)
+    wait_for(lambda: expected in battery_text(w))
+    shown = (battery_text(w) + w.battery_label.toolTip()).lower()
+    assert "charging" not in shown and "0,0 %" not in battery_text(w)
+    assert w.state["host_counters"]["timeouts"] == 0 and w.state["connected"]
+    screenshot(w, "battery-" + expected.split(":")[-1].strip().replace(" ", "-").replace("(", "").replace(")", "")[:24] + ".png")

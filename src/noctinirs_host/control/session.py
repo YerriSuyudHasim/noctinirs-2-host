@@ -24,12 +24,14 @@ from ..wire.envelope import MSG_FRAME, parse_envelope
 from ..wire.errors import WireError
 from ..wire.optical import LAYOUT_RAW, parse_raw
 from .protocol import (
-    LED_CHANNELS, LED_MAX_MA, OP_CLEAR_FAULT, OP_GET_CONFIG, OP_GET_TIME, OP_HEARTBEAT, OP_INFO, OP_SAFE_OFF,
+    LED_CHANNELS, LED_MAX_MA, OP_CLEAR_FAULT, OP_GET_BATTERY, OP_GET_CONFIG, OP_GET_TIME, OP_HEARTBEAT, OP_INFO, OP_SAFE_OFF,
     OP_SET_FS, OP_SET_LED_CURRENT, OP_SET_MODE, OP_START, OP_STATUS, OP_STOP, ST_STOPPED,
     ST_STARTING, ST_STOPPING,
-    ST_FAULTED, ST_SAFE_OFF, ST_STREAMING, TIMED_OPS, Reply, args_host_time, args_set_fs, args_set_led_current,
+    ST_FAULTED, ST_SAFE_OFF, ST_STREAMING, STATUS_UNKNOWN_COMMAND, TIMED_OPS, Reply, args_host_time, args_set_fs, args_set_led_current,
     decode_reply, encode_request, state_name,
 )
+
+from .battery import QUERY_TIMEOUT_S as BATTERY_TIMEOUT_S, BatteryMonitor
 
 HEARTBEAT_PERIOD_S = 0.5  # local implementation record
 STATUS_PERIOD_S = 2.0  # host-chosen: keeps the displayed state fresh while not streaming
@@ -167,6 +169,13 @@ class SessionController:
         self._busy = False
         self._stop_requested = False
         self._start_probe_at: float | None = None
+        # Battery (ADR-0004 section 14). Off by default so the earlier stages are unchanged;
+        # EngineeringRun turns it on. Separate counters and log: a battery miss is not a link
+        # loss, and these events are not recorded in a RAW sidecar.
+        self.battery_enabled = False
+        self.battery = BatteryMonitor()
+        self.battery_counters = dict(queries=0, timeouts=0, unsupported=0, errors=0)
+        self.battery_log: list[str] = []
 
     # --- bookkeeping ----------------------------------------------------
     def _log(self, kind: str, text: str) -> None:
@@ -176,6 +185,9 @@ class SessionController:
             fn(ev)
 
     def _set_state(self, reply: Reply) -> None:
+        if (self.battery_enabled and self.session_id and self.device_state in OWNED_STATES
+                and reply.state == ST_STOPPED):
+            self.battery.note_stopped(self._clock())  # the device refreshes ~5 s after cleanup
         if self.device_state is not None and reply.state != self.device_state:
             self._log("state", f"device state {state_name(self.device_state)} -> {reply.state_text}")
         self.device_state, self.fault_code = reply.state, reply.fault
@@ -201,7 +213,9 @@ class SessionController:
         return batch, rx_us
 
     # --- one transaction ----------------------------------------------------
-    def _request(self, opcode: int, args: bytes, *, retries: int) -> Reply | None:
+    def _request(self, opcode: int, args: bytes, *, retries: int, timeout_s: float | None = None,
+                 count_timeout: bool = True) -> Reply | None:
+        wait = self.timeout_s if timeout_s is None else timeout_s
         self._rebooted = False
         rid = self._next_id
         self._next_id = (rid + 1) & 0xFFFFFFFF or 1
@@ -212,7 +226,7 @@ class SessionController:
             now = time.monotonic()
             if now >= cutoff:
                 break
-            deadline = min(now + self.timeout_s, cutoff)
+            deadline = min(now + wait, cutoff)
             self._t.send(wire)
             self.counters["sent"] += 1
             if attempt:
@@ -230,7 +244,8 @@ class SessionController:
                         return reply
                     if self._rebooted:
                         return None
-        self.counters["timeouts"] += 1
+        if count_timeout:
+            self.counters["timeouts"] += 1
         return None
 
     def _route_frame(self, raw: bytes, rx_us: int | None) -> bool:
@@ -289,8 +304,10 @@ class SessionController:
         # Session-changing ACKs can return a new ID, an old STOP acceptance
         # (STOPPING), or zero after teardown. Errors can report another owner's
         # ID: observe the state, never acquire that ID.
+        # get_battery carries the current session id of the device, which may belong to another
+        # endpoint. It is data about the device, never a session to adopt or reject.
         if reply.ok and self.session_id and opcode not in (
-                OP_START, OP_STOP, OP_SAFE_OFF, OP_CLEAR_FAULT) \
+                OP_START, OP_STOP, OP_SAFE_OFF, OP_CLEAR_FAULT, OP_GET_BATTERY) \
                 and reply.session_id != self.session_id:
             self.counters["wrong_session"] += 1
             return None
@@ -410,6 +427,8 @@ class SessionController:
         self.connected = True
         self._last_hb = self._last_status = self._clock()
         self._log("link", "connected" + (" to a SIMULATED device" if self.simulated else ""))
+        if self.battery_enabled:
+            self.query_battery()  # first reading right after INFO and get_config; failure is not fatal
         return CommandResult("connect", True, True, "OK", "connected", cfg.reply)
 
     def disconnect(self) -> None:
@@ -425,6 +444,7 @@ class SessionController:
         self.info = {}
         self._connected_info = None
         self._stop_requested = False
+        self.battery.reset()
 
     close = disconnect
 
@@ -641,6 +661,67 @@ class SessionController:
             self.settings.current_ma[channel] = current_ma
         return res
 
+    def query_battery(self) -> CommandResult:
+        """Read-only battery query (opcode 0x0033). Never changes session, state or lease.
+
+        One attempt with a short timeout so it cannot hold up the owner heartbeat. A missing or
+        unusable reply is counted as a battery timeout, not a control timeout."""
+        name = "get_battery"
+        if (not self.connected or self._busy or self.start_uncertain
+                or self.device_state in (ST_STARTING, ST_STOPPING)):
+            return CommandResult(name, False, False, "LOCAL_REJECT", "battery query not allowed now")
+        now = self._clock()
+        self.battery.attempted(now)
+        self.battery_counters["queries"] += 1
+        before = self.battery.status
+        self._busy = True
+        try:
+            reply = self._request(OP_GET_BATTERY, b"", retries=0, timeout_s=BATTERY_TIMEOUT_S,
+                                  count_timeout=False)
+        except OSError as exc:
+            self.counters["io_errors"] += 1
+            self._forget_link()
+            self._t.close()
+            self._log("link", f"{name}: transport error ({exc}); reconnect required")
+            return CommandResult(name, False, True, "IO_ERROR", str(exc))
+        finally:
+            self._busy = False
+        if reply is None:
+            if not self.connected:
+                return CommandResult(name, False, True, "LINK_LOST", "device rebooted")
+            self.battery_counters["timeouts"] += 1
+            self.battery.on_no_reply(now)
+            result = CommandResult(name, False, True, "TIMEOUT", "no usable reply")
+        elif reply.status == STATUS_UNKNOWN_COMMAND:
+            self.battery_counters["unsupported"] += 1
+            self.battery.on_unsupported(now)
+            result = CommandResult(name, False, True, reply.status_text,
+                                   "firmware without battery query", reply)
+        elif not reply.ok:
+            self.battery_counters["errors"] += 1
+            self.battery.on_status_error(now, reply.status_text)
+            result = CommandResult(name, False, True, reply.status_text,
+                                   f"device answered {reply.status_text}", reply)
+        else:
+            self.battery.on_reading(now, reply.battery, reply.simulated)
+            result = CommandResult(name, True, True, "OK", "ok", reply)
+        if self.battery.status != before and self.battery.status != "OK":
+            self.battery_log.append(f"battery: {self.battery.status}"
+                                    + (f" ({self.battery.detail})" if self.battery.detail else ""))
+            del self.battery_log[:-50]
+        return result
+
+    def _battery_tick(self, now: float) -> None:
+        if (not self.connected or self.start_uncertain or not self.battery_enabled
+                or self.device_state in (ST_STARTING, ST_STOPPING)):
+            return
+        owned = bool(self.session_id and self.device_state in OWNED_STATES)
+        # The owner heartbeat goes first. Do not start a query that could run into it.
+        if owned and self._clock() - self._last_hb > HEARTBEAT_PERIOD_S - BATTERY_TIMEOUT_S:
+            return
+        if self.battery.due(now, streaming=self.device_state not in (ST_STOPPED, None)):
+            self.query_battery()
+
     def pump(self) -> None:
         """Hand pending FRAME datagrams to the sink. Replies seen here are late/duplicates."""
         if self._busy or not self.connected:
@@ -695,3 +776,4 @@ class SessionController:
                 res = self.refresh_status(quiet=True)
                 if res.reply and self.device_state not in OWNED_STATES:
                     self.session_id = 0
+        self._battery_tick(now)

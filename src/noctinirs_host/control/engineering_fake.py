@@ -38,11 +38,13 @@ class EngineeringFake(DeviceSimulator):
 
     def __init__(self, *args, **kwargs):
         opts = {k: kwargs.pop(k) for k in ("dead_slots", "saturate", "drop_cycles", "leak",
-                                           "info_extra") if k in kwargs}
+                                           "info_extra", "battery_mode", "battery",
+                                           "battery_age_override_ms") if k in kwargs}
         super().__init__(*args, **kwargs)
         self.geometry = kwargs.get('geometry')
         for k, v in opts.items():
             setattr(self, k, v)
+        self.battery_mode = opts.get("battery_mode", "ok")  # the UI fake models battery-capable firmware
         self._rng = random.Random(20261109)
         self._cycle = 0
         self._pending: list[bytes] = []

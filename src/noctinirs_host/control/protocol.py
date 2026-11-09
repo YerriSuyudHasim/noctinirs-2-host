@@ -12,6 +12,7 @@ Not verified against a running device. All integers little endian.
 
 from __future__ import annotations
 
+import re
 import struct
 import zlib
 from dataclasses import dataclass, field
@@ -24,6 +25,12 @@ from ..wire.envelope import (
 from ..wire.errors import WireError
 
 FIRMWARE_PIN = "bd880f5890ea1a72d54e8ab9cc2ed55f002d1382"
+# Battery query (opcode 0x0033) is pinned separately. FIRMWARE_PIN above also feeds the RAW
+# recording metadata and must not change for a battery feature.
+BATTERY_FIRMWARE_PIN = "519a96a26ede6517595d4f8a87cd64ab6b7a6fa5"  # branch feat/local-v4-battery-refresh
+BATTERY_CONTRACT = ("noctinirs-2 docs/adr/0004-host-protocol.md section 14 'V4 Batch 5A battery "
+                    "query and idle refresh', registry row 0x0033 in section 3.5; wire=ADR0004/1; "
+                    "reference client tools/nn2ctl.py get-battery @ 519a96a")
 
 OP_HEARTBEAT = 0x0001
 OP_INFO = 0x0002
@@ -37,12 +44,14 @@ OP_CLEAR_FAULT = 0x0021
 OP_SET_FS = 0x0100
 OP_SET_LED_CURRENT = 0x0101
 OP_SET_MODE = 0x0102  # one byte: 0 ACQ, 1 ENGINEERING; STOPPED only
+OP_GET_BATTERY = 0x0033  # no arguments; read-only; any session id; never refreshes a lease
 
 OPCODE_NAMES = {
     OP_HEARTBEAT: "heartbeat", OP_INFO: "info", OP_STATUS: "status",
     OP_GET_CONFIG: "get_config", OP_GET_TIME: "get_time", OP_START: "start_stream",
     OP_STOP: "stop_stream", OP_SAFE_OFF: "safe_off", OP_CLEAR_FAULT: "clear_fault",
     OP_SET_FS: "set_fs", OP_SET_LED_CURRENT: "set_led_current", OP_SET_MODE: "set_mode",
+    OP_GET_BATTERY: "get_battery",
 }
 TIMED_OPS = (OP_HEARTBEAT, OP_STATUS, OP_GET_TIME)  # carry an opaque u64 host timestamp
 MUTATING_OPS = (OP_START, OP_STOP, OP_CLEAR_FAULT, OP_SET_FS, OP_SET_LED_CURRENT, OP_SET_MODE)
@@ -152,6 +161,51 @@ def encode_frame(payload: bytes, *, simulated: bool, session_id: int, sequence: 
     return _envelope(MSG_FRAME, payload, flags, session_id, sequence, timestamp_us)
 
 
+_BATTERY_TEXT = re.compile(
+    rb"battery_valid=([01]) battery_uv=(\d{1,20}) battery_mperm=(\d{1,20})"
+    rb" battery_age_ms=(-?\d{1,20}) battery_error=(-?\d{1,10})")
+
+
+@dataclass(frozen=True)
+class BatteryReading:
+    """get_battery extension (ASCII key=value text, ADR-0004 section 14).
+
+    mperm is thousandths of a percent and is not clamped by the firmware. age_ms is the age of
+    the last successful sample on the device's monotonic clock (-1: none yet). error is an
+    esp_err_t decimal (0 ok, 259 no sample yet, 262 not supported by the binding)."""
+    valid: bool
+    uv: int
+    mperm: int
+    age_ms: int
+    error: int
+
+    @property
+    def percent(self) -> float:
+        return self.mperm / 1000.0
+
+    @property
+    def volts(self) -> float:
+        return self.uv / 1_000_000.0
+
+
+def parse_battery(ext: bytes) -> BatteryReading:
+    m = _BATTERY_TEXT.fullmatch(ext)
+    if not m:
+        raise WireError("reply_ext", "battery reply fields")
+    valid, uv, mperm, age_ms, error = (int(g) for g in m.groups())
+    if valid and age_ms < 0:
+        raise WireError("reply_ext", "battery valid with negative age")
+    if not valid and (uv != 0 or mperm != 0 or age_ms != -1 or error == 0):
+        raise WireError("reply_ext", "battery invalid reading carries values")
+    return BatteryReading(bool(valid), uv, mperm, age_ms, error)
+
+
+def encode_battery_ext(*, valid: bool, uv: int, mperm: int, age_ms: int, error: int) -> bytes:
+    """Text extension for simulators and tests (same field order as the firmware)."""
+    return (f"battery_valid={int(valid)} battery_uv={uv} battery_mperm={mperm} "
+            f"battery_age_ms={age_ms} battery_error={error}").encode("ascii")
+
+
 @dataclass(frozen=True)
 class Reply:
     req_id: int
@@ -173,6 +227,7 @@ class Reply:
     counters: dict[str, int] = field(default_factory=dict)
     t_host_us: int | None = None
     t_tx_us: int | None = None
+    battery: BatteryReading | None = None
 
     @property
     def ok(self) -> bool:
@@ -241,6 +296,8 @@ def decode_reply(datagram: bytes) -> Reply:
             if grace > 1:
                 raise WireError("reply_ext", "grace field")
             kw["counters"] = {**dict(zip(names, vals)), "grace_active": grace}
+    elif opcode == OP_GET_BATTERY:
+        kw["battery"] = parse_battery(bytes(ext))
     elif ext:
         raise WireError("reply_ext", "unexpected command data")
     return Reply(req_id, opcode, status, state, fault, bool(simulated), boot_id, t_rx,

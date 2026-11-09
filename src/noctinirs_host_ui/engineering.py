@@ -18,6 +18,7 @@ from noctinirs_host.geometry import load_geometry
 from noctinirs_host.preview import PREVIEW_LABEL
 from noctinirs_host.preview.params import PreviewConfig
 
+from .battery_text import format_battery
 from .credits import APP_NAME, about_text
 from .preview_panel import PreviewPanel, PreviewSettingsForm
 from .resources import geometry_path
@@ -45,6 +46,10 @@ QPushButton#primary { background: #1975cf; color: #ffffff; font-weight: bold; }
 QPushButton:focus, QLineEdit:focus, QComboBox:focus, QTextEdit:focus { border: 2px solid #1975cf; }
 QPushButton:hover { border-color: #1975cf; }
 QPushButton:disabled, QPushButton#primary:disabled { background: #eef6ff; color: #526a80; }
+QLabel#battery { padding: 4px 10px; border: 1px solid #cfe0ef; border-radius: 8px;
+    background: #ffffff; }
+QLabel#battery[level="low"] { background: #fff3cf; color: #5f4300; border-color: #e3c36a; }
+QLabel#battery[level="problem"] { color: #7a5a00; }
 QLabel#chip { padding: 3px 9px; border-radius: 10px; background: #eef6ff; }
 QLabel#chip[active="true"] { background: #1975cf; color: #ffffff; font-weight: bold; }
 """
@@ -136,7 +141,16 @@ class EngineeringWindow(QtWidgets.QMainWindow):
         self.setCentralWidget(root)
         layout = QtWidgets.QVBoxLayout(root)
         layout.setContentsMargins(16, 12, 16, 12)
-        layout.addWidget(_label("NoctiNIRS 2   |   ENGINEERING / NON-SCIENCE   |   " + PREVIEW_LABEL, "banner"))
+        header = QtWidgets.QHBoxLayout()
+        layout.addLayout(header)
+        header.addWidget(_label("NoctiNIRS 2   |   ENGINEERING / NON-SCIENCE   |   " + PREVIEW_LABEL,
+                                "banner"), 1)
+        self.battery_label = QtWidgets.QLabel("Baterai —")
+        self.battery_label.setObjectName("battery")
+        self.battery_label.setWordWrap(True)
+        self.battery_label.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        self.battery_label.setMaximumWidth(430)
+        header.addWidget(self.battery_label)
         self.step = _label(name="step")
         layout.addWidget(self.step)
         self.screens = QtWidgets.QStackedWidget()
@@ -621,7 +635,18 @@ class EngineeringWindow(QtWidgets.QMainWindow):
                                  f"{_value(s.get('fs'))} Hz")
         self.fs.setEnabled(capable and bool(rates) and not busy)
         self.apply.setEnabled(bool(s.get("stopped") and capable and not busy and self._desired_fs in rates))
+        self._render_battery()
         self._render_capture()
+
+    def _render_battery(self):
+        info = format_battery(self.state.get("battery"))
+        if self.battery_label.text() != info.text:
+            self.battery_label.setText(info.text)
+        self.battery_label.setToolTip(info.tooltip)
+        if self.battery_label.property("level") != info.level:
+            self.battery_label.setProperty("level", info.level)
+            self.battery_label.style().unpolish(self.battery_label)
+            self.battery_label.style().polish(self.battery_label)
 
     def _sync_destination(self):
         """Ask the worker which record_X the next START would use (no files created)."""

@@ -45,6 +45,8 @@ class Peer:
         self.capability = "fs_min=2;fs_max=10;fs_allowed=2,4,5,8,10;current_max_ma=35"
         self.requests, self.cache, self.errors = [], {}, []
         self.executed_starts = 0
+        self.battery = None  # text extension bytes; None = firmware without get_battery
+        self.battery_requests = []
         self.filter = lambda peer, req, raw, reply, source: [reply]
         self.thread = threading.Thread(target=self.run, name="fake-udp-peer")
         self.thread.start()
@@ -56,6 +58,10 @@ class Peer:
 
     def execute(self, req, source):
         op = req.opcode
+        if op == P.OP_GET_BATTERY:  # read-only, any session id, any endpoint, no lease effect
+            self.battery_requests.append((source, req))
+            return (self.reply(req, status=P.STATUS_UNKNOWN_COMMAND) if self.battery is None
+                    else self.reply(req, extension=self.battery))
         if req.session_id and req.session_id != self.session and op != P.OP_SAFE_OFF:
             return self.reply(req, 1)
         if self.owner and source != self.owner and op not in (

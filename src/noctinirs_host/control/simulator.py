@@ -20,12 +20,12 @@ from ..wire import optical as opt
 from ..wire.envelope import PROTOCOL_VERSION
 from ..wire.errors import WireError
 from .protocol import (
-    LED_CHANNELS, LED_MAX_MA, MUTATING_OPS, OP_CLEAR_FAULT, OP_GET_CONFIG,
+    LED_CHANNELS, LED_MAX_MA, MUTATING_OPS, OP_CLEAR_FAULT, OP_GET_BATTERY, OP_GET_CONFIG,
     OP_GET_TIME, OP_HEARTBEAT, OP_INFO, OP_SAFE_OFF, OP_SET_FS, OP_SET_LED_CURRENT, OP_START,
     OP_STATUS, OP_STOP, OP_SET_MODE, ST_FAULTED, ST_SAFE_OFF, ST_STOPPED, ST_STREAMING, STATUS_BAD_FRAME,
     STATUS_INVALID_ARG, STATUS_INVALID_STATE, STATUS_OK, STATUS_PRECONDITION_FAILED,
     STATUS_RESERVED_FLAGS, STATUS_UNKNOWN_COMMAND, TIMED_OPS, decode_request, encode_frame,
-    encode_reply,
+    encode_battery_ext, encode_reply,
 )
 
 FIRMWARE_PIN = "cbec2dab8e23595ae4e374e181c0d7c70f25edec"  # historical synthetic model
@@ -63,6 +63,15 @@ class DeviceSimulator:
         self._grace_started_at: float | None = None
         self.last_end_reason: str | None = None
         self.fault_active = False  # test hook: clear_fault fails while True
+        # Battery model (ADR-0004 section 14). "old": firmware without the query
+        # (UNKNOWN_COMMAND); "ok": answer; "silent": never answer. MODEL: the sample is
+        # refreshed 5 s after a stream ends and every 30 s while idle; the query itself never
+        # touches the owner lease.
+        self.battery_mode = "old"
+        self.battery = dict(valid=True, uv=3987000, mperm=50500, error=0)
+        self.battery_age_override_ms: int | None = None  # test hook
+        self._battery_sample_at = self._clock()
+        self._battery_refresh_at: float | None = None
         self._cache: OrderedDict[int, tuple[int, bytes, int, bytes]] = OrderedDict()
         self._msg_seq = 0
         self.counters = dict(requests=0, duplicates=0, grace_expirations=0, malformed=0,
@@ -91,6 +100,7 @@ class DeviceSimulator:
         self.session_id = 0
         self._grace_started_at = None
         self.last_end_reason = reason
+        self._battery_refresh_at = self._clock() + 5.0
 
     @property
     def grace_active(self) -> bool:
@@ -106,6 +116,8 @@ class DeviceSimulator:
             self.counters["malformed"] += 1
             return []
         self.counters["requests"] += 1
+        if req.opcode == OP_GET_BATTERY and self.battery_mode == "silent":
+            return []
         # MODEL CHOICE: BAD_FRAME (protocol mismatch) is checked before RESERVED_FLAGS;
         # the documents do not order the two.
         if req.protocol_version != PROTOCOL_VERSION:
@@ -181,6 +193,10 @@ class DeviceSimulator:
         # Zero-argument commands take no argument bytes (local implementation record table).
         # MODEL CHOICE: trailing bytes -> INVALID_ARG, except safe_off, which is never
         # refused (it ignores extra bytes so that turning everything off cannot fail on framing).
+        if op == OP_GET_BATTERY and self.battery_mode == "ok":
+            if args:
+                return self._reply(rid, op, STATUS_INVALID_ARG), False
+            return self._reply(rid, op, STATUS_OK, self._battery_ext()), False
         if op in (OP_INFO, OP_GET_CONFIG, OP_START, OP_STOP, OP_CLEAR_FAULT) and args:
             return self._reply(rid, op, STATUS_INVALID_ARG), op in MUTATING_OPS
         if op == OP_SAFE_OFF:  # accepted in every state, never cached
@@ -267,6 +283,22 @@ class DeviceSimulator:
             self.current_ma[ch] = ma
             return self._reply(rid, op, STATUS_OK), True
         return self._reply(rid, op, STATUS_UNKNOWN_COMMAND), False
+
+    def _battery_ext(self) -> bytes:
+        now = self._clock()
+        due = self._battery_refresh_at
+        if self.state == ST_STOPPED and due is not None and now >= due:
+            self._battery_sample_at, self._battery_refresh_at = due, None
+        elif self.state == ST_STOPPED and now - self._battery_sample_at >= 30.0:
+            self._battery_sample_at = now
+        b = self.battery
+        if not b["valid"]:
+            return encode_battery_ext(valid=False, uv=0, mperm=0, age_ms=-1,
+                                      error=b.get("error") or 259)
+        age = (self.battery_age_override_ms if self.battery_age_override_ms is not None
+               else int((now - self._battery_sample_at) * 1000))
+        return encode_battery_ext(valid=True, uv=b["uv"], mperm=b["mperm"], age_ms=age,
+                                  error=b.get("error", 0))
 
     def _reply(self, req_id: int, opcode: int, status: int, extension: bytes = b"", *,
                session_id: int | None = None) -> bytes:
