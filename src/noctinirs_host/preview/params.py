@@ -6,6 +6,7 @@ import math
 from dataclasses import dataclass, field
 
 from .dpf import scholkmann_wolf_dpf
+from .quality import CONSTANTS
 
 UNVERIFIED = "unverified"
 WAVELENGTHS = ("735", "850")  # nominal labels only; real LED wavelengths are not verified (D7)
@@ -97,9 +98,6 @@ class PreviewConfig:
     ridge_lambda: float = 1e-3
     ssr_window_s: float = 30.0
     ssr_min_samples: int = 30
-    # Host-side evidence thresholds. Provisional and unmeasured (no bench data).
-    min_phase_samples: int = 1
-    min_led_step_counts: float = 50.0
 
     def validate(self) -> None:
         if self.ssr_mode not in SSR_MODES:
@@ -110,9 +108,8 @@ class PreviewConfig:
         _pos(self.ssr_window_s, "ssr_window_s")
         if self.ridge_lambda < 0 or not math.isfinite(self.ridge_lambda):
             raise ValueError("ridge_lambda must be finite and >= 0")
-        if self.min_baseline_samples < 1 or self.ssr_min_samples < 3 or self.min_phase_samples < 1:
+        if self.min_baseline_samples < 1 or self.ssr_min_samples < 3:
             raise ValueError("sample minimums are too small")
-        _pos(self.min_led_step_counts, "min_led_step_counts")
         resolve_dpf(self.dpf)
 
     def to_metadata(self) -> dict:
@@ -127,9 +124,7 @@ class PreviewConfig:
             "short_separation": {"mode": self.ssr_mode, "method": self.ssr_method,
                                  "ridge_lambda": self.ridge_lambda, "window_s": self.ssr_window_s,
                                  "min_samples": self.ssr_min_samples, "domain": "OD", "causal": True},
-            "evidence_thresholds": {"min_phase_samples": self.min_phase_samples,
-                                    "min_led_step_counts": self.min_led_step_counts,
-                                    "status": "provisional_unmeasured"},
+            "quality": dict(CONSTANTS),
             "od": "ln(baseline/I), I = mean(ON_STABLE) - mean(OFF_STABLE) of the same slot",
             "output": "change relative to baseline (delta), micromolar",
         }

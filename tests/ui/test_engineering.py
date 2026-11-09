@@ -251,22 +251,22 @@ def test_sixteen_plots_fill_and_modes_switch(window):
 
 
 def test_invalid_channels_are_gaps_not_zero(window):
-    # Slots 4,5 -> source L3 (CH3, CH4) never step. (6,3),(7,3) saturated -> CH5 (L4, AIN3).
+    # Slots 4,5 -> source L3 (CH3, CH4) have no signal. (6,3),(7,3) saturated -> CH5 (L4, AIN3).
     w = fake_window(window, dead_slots=frozenset({4, 5}), saturate=frozenset({(6, 3), (7, 3)}))
     to_live(w)
     press_start(w)
     wait_for(lambda: w.state.get("session"))
     wait_for(lambda: w.panel.finite_points("CH1") > 4, seconds=15)
-    for name in ("CH3", "CH4", "CH5"):
+    _, a, b = w.panel.series("CH5")                           # saturated: a pure gap, never zero
+    assert len(a) > 3 and all(math.isnan(v) for v in a) and all(math.isnan(v) for v in b)
+    for name in ("CH3", "CH4"):                              # no signal: gap, or a value that is flagged
         _, a, b = w.panel.series(name)
-        assert len(a) > 3 and not (a == 0).any() and not (b == 0).any()
-        assert all(math.isnan(v) for v in a) and all(math.isnan(v) for v in b)
-    w.panel.select("CH3")
-    state_row = dict(w.panel.detail_rows())["State"]
-    assert state_row.startswith("INVALID") and "NO_LED_STEP" in state_row
+        assert not (a == 0).any() and not (b == 0).any()
+        assert all(p.state != "VALID" or "LOW_SIGNAL" in p.warnings for p in w.panel._pts[name])
     w.panel.select("CH5")
     assert "SATURATED" in dict(w.panel.detail_rows())["State"]
     w.panel.refresh()
+    assert "✕" in w.panel.plots["CH5"].getPlotItem().titleLabel.text
     assert w.panel.finite_points("CH1") > 0 and w.panel.finite_points("CH6") > 0
     screenshot(w, "d2-live-invalid-gaps.png")
     w.stop_button.click()
@@ -453,3 +453,124 @@ def test_battery_label_variants(window, options, expected):
     assert "charging" not in shown and "0,0 %" not in battery_text(w)
     assert w.state["host_counters"]["timeouts"] == 0 and w.state["connected"]
     screenshot(w, "battery-" + expected.split(":")[-1].strip().replace(" ", "-").replace("(", "").replace(")", "")[:24] + ".png")
+
+
+# ---- D3: window sizes, layout, quality markers ---------------------------------------------
+
+def nav_visible(w):
+    """Back (and Continue before Live) are shown and lie inside the window."""
+    QtTest.QTest.qWait(40)
+    for button in (w.back,) + ((w.next,) if w.flat < 5 else ()):
+        assert button.isVisible(), (w.flat, button.text())
+        top_left = button.mapTo(w, QtCore.QPoint(0, 0))
+        assert top_left.y() >= 0 and top_left.y() + button.height() <= w.height(), (w.flat, button.text())
+        assert top_left.x() >= 0 and top_left.x() + button.width() <= w.width(), (w.flat, button.text())
+
+
+def test_navigation_row_stays_visible_on_every_screen_and_window_size(window):
+    w = fake_window(window)
+    to_live(w)
+    hint = w.minimumSizeHint()
+    assert hint.height() <= 560 and hint.width() <= 1024      # no page forces a big minimum on the rest
+    for size in ((1280, 720), (1366, 768), (1024, 600)):
+        w.showNormal()
+        w.resize(*size)
+        for flat in (0, 1, 2, 3, 4, 5):
+            w._go(flat)
+            nav_visible(w)
+            assert w.height() <= size[1] + 2                  # the window did not grow past the screen size
+    for mode in (w.showMaximized, w.showFullScreen):
+        mode()
+        for flat in (0, 1, 2, 3, 4, 5):
+            w._go(flat)
+            nav_visible(w)
+    w.showNormal()
+
+
+def test_live_layout_controls_left_graphs_right_and_plots_follow_the_window(window):
+    w = fake_window(window)
+    to_live(w)
+    assert w.live_split.widget(0) is w.side_scroll and w.live_split.widget(1) is w.panel
+    assert w.side_scroll.minimumWidth() != w.side_scroll.maximumWidth()      # no fixed width
+    w.showNormal()
+    w.resize(1366, 768)
+    QtTest.QTest.qWait(100)
+    small = w.panel.plots["CH1"].height()
+    assert w.side_scroll.width() <= 480 and w.panel.width() > 2 * w.side_scroll.width()
+    assert small >= 40                                       # not the old 52 px minimum, but usable
+    w.resize(1920, 1080)
+    QtTest.QTest.qWait(100)
+    assert w.panel.plots["CH1"].height() > small * 1.25      # plots stretch with the window
+    for name in ("Sesi dan kontrol", "Tampilan", "Pratinjau: DPF, SCR, baseline", "Detail channel"):
+        assert any(b.text().startswith(name) for b in w.findChildren(QtWidgets.QToolButton)), name
+    before = w.panel.plots["CH1"].height()
+    w.section_detail.button.click()                          # fold the detail away
+    assert not w.detail.isVisible()
+    w.section_detail.button.click()
+    QtTest.QTest.qWait(50)
+    assert w.panel.plots["CH1"].height() == before           # the detail never shrinks the graphs for good
+    assert not w.section_diag.expanded
+    screenshot(w, "d3-live-layout.png")
+
+
+def test_click_opens_channel_detail_and_markers_differ_from_gaps(window):
+    # CH1 (source L2) gets a small opposite-side step: a warning, the line stays.
+    # CH5 is saturated: a gap. SC1L/SC2L are dead, so the left long channels go uncorrected with 5 mm SCR.
+    w = fake_window(window, leak={2: 60.0}, saturate=frozenset({(6, 3), (7, 3)}), dead_slots=frozenset({0, 1}))
+    to_live(w)
+    w.live_form.ssr_mode.setCurrentIndex(w.live_form.ssr_mode.findData("5mm"))
+    wait_for(lambda: w.apply_live_button.isEnabled())
+    w.apply_live_button.click()
+    wait_for(lambda: w.state["preview_config"].ssr_mode == "5mm")
+    press_start(w)
+    wait_for(lambda: w.panel.finite_points("CH1") > 8 and w.panel.marker_counts("CH1")[0] > 2, seconds=20)
+    warn, unc = w.panel.marker_counts("CH1")
+    assert warn > 0 and unc > 0 and w.panel.finite_points("CH1") > 0     # flagged but drawn
+    assert w.panel.marker_counts("CH5") == (0, 0) and w.panel.finite_points("CH5") == 0   # a gap
+    assert "▲" in w.panel.plots["CH1"].getPlotItem().titleLabel.text
+    assert "✕" in w.panel.plots["CH5"].getPlotItem().titleLabel.text
+    assert "LEAK_WARN" in w.panel.plots["CH1"].toolTip() or "tanpa koreksi" in w.panel.plots["CH1"].toolTip()
+    w.panel.chips["SC1L"].click()                              # click opens the channel detail
+    assert w.panel.current == "SC1L" and "SC1L_I735" in w.detail.toPlainText()
+    w.panel.plots["CH1"].scene().sigMouseClicked.emit(None)    # a click on a plot selects it as well
+    w.panel.select("CH1")
+    text = w.detail.toPlainText()
+    assert "CH1_OD735" in text and "tanpa koreksi SCR" in text and "I/σ" in text
+    screenshot(w, "d3-live-markers.png")
+    w.stop_button.click()
+    wait_for(lambda: w.state["device_state"] == "STOPPED", seconds=15)
+
+
+def test_packet_loss_counter_is_shown(window):
+    w = fake_window(window, drop_cycles=frozenset({20, 21}))
+    to_live(w)
+    press_start(w)
+    wait_for(lambda: "400 sampel" in w.loss_label.toPlainText(), seconds=20)
+    assert "gap_before dari perangkat: 0" in w.loss_label.toPlainText()
+    w.stop_button.click()
+    wait_for(lambda: w.state["device_state"] == "STOPPED", seconds=15)
+
+
+def test_robust_auto_scale_clamps_and_marks_spikes_but_full_range_does_not(qapp):
+    from noctinirs_host.preview.pipeline import ChannelPoint, FrameResult
+    from noctinirs_host_ui.preview_panel import PreviewPanel
+
+    geo = load_geometry(GEOMETRY)
+    panel = PreviewPanel(geo)
+    panel.show()
+
+    def frame(i, value):
+        pts = {c.name: ChannelPoint(c.name, c.kind, "VALID", d_hbo=value, d_hbr=-value) for c in geo.channels}
+        return FrameResult(i * 0.1, pts, True)
+
+    panel.push([frame(i, 0.1 * math.sin(i / 5)) for i in range(120)] + [frame(120, 500.0)])
+    panel.refresh()
+    assert panel.clamped_points("CH1") >= 1                    # the spike is marked, not silently cut
+    lo, hi = panel.plots["CH1"].getPlotItem().viewRange()[1]
+    assert hi < 5 and lo > -5                                   # the signal itself stays readable
+    panel.scale_combo.setCurrentIndex(panel.scale_combo.findData("full"))
+    panel.refresh()
+    QtTest.QTest.qWait(80)                                      # pyqtgraph applies auto range on the next event
+    assert panel.clamped_points("CH1") == 0
+    assert panel.plots["CH1"].getPlotItem().viewRange()[1][1] > 100
+    panel.close()

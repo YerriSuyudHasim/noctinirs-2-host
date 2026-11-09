@@ -26,6 +26,8 @@ class SlotMeasurement:
     host_us: int
     on_sum: list = field(default_factory=lambda: [0, 0, 0, 0])
     off_sum: list = field(default_factory=lambda: [0, 0, 0, 0])
+    on_sq: list = field(default_factory=lambda: [0, 0, 0, 0])    # sums of squares, for sigma
+    off_sq: list = field(default_factory=lambda: [0, 0, 0, 0])
     on_n: int = 0
     off_n: int = 0
     saturated: list = field(default_factory=lambda: [False] * 4)
@@ -37,6 +39,28 @@ class SlotMeasurement:
 
     def off_mean(self, ain: int) -> float | None:
         return self.off_sum[ain] / self.off_n if self.off_n else None
+
+    @staticmethod
+    def _var(total: int, sq: int, n: int) -> float:
+        if n < 2:
+            return 0.0
+        return max(0.0, (sq - total * total / n) / (n - 1))
+
+    def on_var(self, ain: int) -> float:
+        return self._var(self.on_sum[ain], self.on_sq[ain], self.on_n)
+
+    def off_var(self, ain: int) -> float:
+        return self._var(self.off_sum[ain], self.off_sq[ain], self.off_n)
+
+    def within_sigma(self, ain: int) -> float:
+        """White-noise sigma of mean(ON) - mean(OFF) from the samples inside this slot."""
+        if self.on_n < 2 or self.off_n < 2:
+            return 0.0
+        return (self.on_var(ain) / self.on_n + self.off_var(ain) / self.off_n) ** 0.5
+
+    def flat_on(self, ain: int) -> bool:
+        """True when every ON_STABLE sample was identical (a flat top)."""
+        return self.on_n >= 3 and self.on_sq[ain] * self.on_n == self.on_sum[ain] ** 2
 
 
 class SlotAssembler:
@@ -93,14 +117,15 @@ class SlotAssembler:
             cur = self._cur
             if s.phase_class == PH_ON_STABLE:
                 cur.on_n += 1
-                target = cur.on_sum
+                target, squares = cur.on_sum, cur.on_sq
             elif s.phase_class == PH_OFF_STABLE:
                 cur.off_n += 1
-                target = cur.off_sum
+                target, squares = cur.off_sum, cur.off_sq
             else:
                 continue
             for k, v in enumerate(s.ain):
                 target[k] += v
+                squares[k] += v * v
                 if v >= ADC_MAX or v <= ADC_MIN:
                     cur.saturated[k] = True
         return out

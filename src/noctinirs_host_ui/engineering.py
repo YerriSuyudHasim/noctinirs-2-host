@@ -10,7 +10,7 @@ import sys
 import time
 
 import PySide6
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 from noctinirs_host import __version__
 from noctinirs_host.engineering import EngineeringRun, UNKNOWN, default_recording_folder
@@ -22,7 +22,7 @@ from .battery_text import format_battery
 from .credits import APP_NAME, about_text
 from .preview_panel import PreviewPanel, PreviewSettingsForm
 from .resources import geometry_path
-from .widgets import AutoText
+from .widgets import AutoText, Section
 
 SCREENS = ("Welcome", "Setup", "Live")
 BACKGROUND = ("preview_destination",)  # housekeeping: never shown as "Working", never clears errors
@@ -34,7 +34,7 @@ QWidget#page { background: #ffffff; border: 1px solid #cfe0ef; border-radius: 10
 QLabel#banner, QLabel#step, QLabel#detail, QLabel#feedback {
     background: #eef6ff; border: 1px solid #cfe0ef; border-radius: 8px; padding: 8px;
 }
-QLabel#banner { font-size: 17px; font-weight: bold; }
+QLabel#banner { font-size: 14px; font-weight: bold; padding: 5px 8px; }
 QLabel#previewbanner { background: #fff3cf; color: #5f4300; border: 1px solid #e3c36a;
     border-radius: 6px; padding: 5px; font-weight: bold; }
 QLabel#title { font-size: 24px; font-weight: bold; }
@@ -116,7 +116,10 @@ class EngineeringWindow(QtWidgets.QMainWindow):
     def __init__(self, geometry, host_sha=None, *, run_factory=EngineeringRun, documents=None):
         super().__init__()
         self.setWindowTitle("NoctiNIRS 2 Host — RAW Engineering")
-        self.resize(1320, 900)
+        avail = (QtGui.QGuiApplication.primaryScreen().availableGeometry()
+                 if QtGui.QGuiApplication.primaryScreen() else None)
+        self.setMinimumSize(640, 420)
+        self.resize(min(1320, avail.width()) if avail else 1320, min(900, avail.height()) if avail else 900)
         self.geometry = geometry
         self.state = {}
         self.flat = 0
@@ -143,8 +146,7 @@ class EngineeringWindow(QtWidgets.QMainWindow):
         layout.setContentsMargins(16, 12, 16, 12)
         header = QtWidgets.QHBoxLayout()
         layout.addLayout(header)
-        header.addWidget(_label("NoctiNIRS 2   |   ENGINEERING / NON-SCIENCE   |   " + PREVIEW_LABEL,
-                                "banner"), 1)
+        header.addWidget(_label("NoctiNIRS 2 · ENGINEERING / NON-SCIENCE · " + PREVIEW_LABEL, "banner"), 1)
         self.battery_label = QtWidgets.QLabel("Baterai —")
         self.battery_label.setObjectName("battery")
         self.battery_label.setWordWrap(True)
@@ -156,9 +158,11 @@ class EngineeringWindow(QtWidgets.QMainWindow):
         self.screens = QtWidgets.QStackedWidget()
         layout.addWidget(self.screens, 1)
         self.feedback = _label(name="feedback")
+        self.feedback.setMaximumHeight(64)   # the navigation row below must always keep its room
         self.feedback.hide()
         layout.addWidget(self.feedback)
         self.error = _label(name="error")
+        self.error.setMaximumHeight(64)
         self.error.hide()
         layout.addWidget(self.error)
         self._form_error = ""
@@ -335,62 +339,90 @@ class EngineeringWindow(QtWidgets.QMainWindow):
 
     # ---- screen 3: Live ------------------------------------------------------
     def _live(self):
-        page = QtWidgets.QWidget(objectName="page")
-        self.screens.addWidget(page)
-        outer = QtWidgets.QVBoxLayout(page)
-        outer.setContentsMargins(10, 8, 10, 8)
-        top = QtWidgets.QHBoxLayout()
-        outer.addLayout(top)
+        """Left: narrow, scrollable settings and controls. Right: the graphs, as large as the window
+        allows. A splitter lets the operator move the divider; nothing has a fixed size."""
+        split = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        split.setChildrenCollapsible(False)
+        split.setObjectName("livesplit")
+        self.screens.addWidget(self._scroll(split))
+        self.live_split = split
+
+        side_widget = QtWidgets.QWidget(objectName="page")
+        side = QtWidgets.QVBoxLayout(side_widget)
+        side.setContentsMargins(8, 6, 8, 6)
+        side.setSpacing(2)
+
+        def block(title, expanded=True):
+            body = QtWidgets.QWidget()
+            lay = QtWidgets.QVBoxLayout(body)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.setSpacing(4)
+            sec = Section(title, body, expanded=expanded)
+            side.addWidget(sec)
+            return lay, sec
+
+        lay, self.section_session = block("Sesi dan kontrol")
         self.device = AutoText(min_lines=3)
-        top.addWidget(self.device, 3)
-        buttons = QtWidgets.QGridLayout()
-        top.addLayout(buttons, 2)
+        lay.addWidget(self.device)
+        grid = QtWidgets.QGridLayout()
+        lay.addLayout(grid)
         self.start_button = self._button("Start acquisition", self._start, primary=True)
         self.stop_button = self._button("Stop acquisition", lambda: self._submit("stop"))
         self.diag_button = self._button("Refresh diagnostics", lambda: self._submit("diagnostics"))
         self.panel_disconnect = self._button("Disconnect", self._disconnect)
-        buttons.addWidget(self.start_button, 0, 0)
-        buttons.addWidget(self.stop_button, 0, 1)
-        buttons.addWidget(self.diag_button, 1, 0)
-        buttons.addWidget(self.panel_disconnect, 1, 1)
-        self._recovery_row(outer)
+        grid.addWidget(self.start_button, 0, 0)
+        grid.addWidget(self.stop_button, 0, 1)
+        grid.addWidget(self.diag_button, 1, 0)
+        grid.addWidget(self.panel_disconnect, 1, 1)
+        self._recovery_row(lay)
         self.recording = AutoText(min_lines=2)
-        split = QtWidgets.QHBoxLayout()
-        outer.addLayout(split, 1)
+        lay.addWidget(self.recording)
+        self.loss_label = AutoText(min_lines=2)
+        lay.addWidget(self.loss_label)
+
         self.panel = PreviewPanel(self.geometry)
         self.panel.detail_changed.connect(self._show_detail)
-        split.addWidget(self.panel, 1)
-        side_widget = QtWidgets.QWidget(objectName="page")
-        side = QtWidgets.QVBoxLayout(side_widget)
-        side.setContentsMargins(0, 0, 6, 0)
-        side.addWidget(_label("Channel detail (click a plot or a short channel)"))
-        self.detail = AutoText(min_lines=12)
-        side.addWidget(self.detail)
-        side.addWidget(_label("Live PREVIEW settings"))
+        lay, self.section_display = block("Tampilan")
+        lay.addWidget(self.panel.controls)
+
+        lay, self.section_preview = block("Pratinjau: DPF, SCR, baseline")
         self.live_form = PreviewSettingsForm(("mbll", "ssr"), self.preview_cfg)
-        side.addWidget(self.live_form)
-        buttons = QtWidgets.QHBoxLayout()
+        lay.addWidget(self.live_form)
+        row = QtWidgets.QHBoxLayout()
         self.apply_live_button = self._button("Apply live settings", self._apply_live, primary=True)
         self.reset_baseline_button = self._button("Reset baseline", lambda: self._submit("reset_preview_baseline"))
-        buttons.addWidget(self.apply_live_button)
-        buttons.addWidget(self.reset_baseline_button)
-        side.addLayout(buttons)
-        side.addStretch()
-        side_scroll = self._scroll(side_widget)
-        side_scroll.setFixedWidth(450)
-        side_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        split.addWidget(side_scroll)
+        row.addWidget(self.apply_live_button)
+        row.addWidget(self.reset_baseline_button)
+        lay.addLayout(row)
+
+        lay, self.section_detail = block("Detail channel (klik plot atau chip short)")
+        self.detail = AutoText(min_lines=12)
+        lay.addWidget(self.detail)
+
+        lay, self.section_diag = block("Diagnostik", expanded=False)
         self.raw = AutoText(min_lines=4)
         self.diagnostics = AutoText(min_lines=4)
         self.log_view = QtWidgets.QPlainTextEdit(readOnly=True)
         self.log_view.setAccessibleName("Recent session log, UTC")
+        self.log_view.setMinimumHeight(120)
         tabs = QtWidgets.QTabWidget()
-        tabs.addTab(self._scroll(self.recording), "Recorder")
-        tabs.addTab(self._scroll(self.raw), "RAW diagnostics")
-        tabs.addTab(self._scroll(self.diagnostics), "Recorder and firmware")
+        tabs.addTab(self._scroll(self.raw), "RAW")
+        tabs.addTab(self._scroll(self.diagnostics), "Recorder / firmware")
         tabs.addTab(self.log_view, "Log")
-        tabs.setMaximumHeight(120)
-        outer.addWidget(tabs)
+        tabs.setMinimumHeight(220)
+        lay.addWidget(tabs)
+        side.addStretch()
+
+        side_scroll = self._scroll(side_widget)
+        side_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        side_scroll.setMinimumWidth(300)
+        side_scroll.setMaximumWidth(480)
+        self.side_scroll = side_scroll
+        split.addWidget(side_scroll)
+        split.addWidget(self.panel)
+        split.setStretchFactor(0, 0)
+        split.setStretchFactor(1, 1)
+        split.setSizes([340, 960])
 
     def _recovery_row(self, page):
         row = QtWidgets.QHBoxLayout()
@@ -687,8 +719,16 @@ class EngineeringWindow(QtWidgets.QMainWindow):
             "Short channels (from the geometry file): "
             + ", ".join(f"{c.name} {c.sd_mm:g} mm ({c.source}–{c.pd})"
                         for c in self.geometry.channels if c.kind == "short")
-            + (". Geometry is DRAFT." if self.geometry.is_draft else "."))
+            + (". Geometry is DRAFT; the 5/8 mm labels are unverified (SC2 saturated on 9 Nov)."
+               if self.geometry.is_draft else "."))
         recorder_state = s.get("recording", "IDLE")
+        loss = s.get("preview_loss") or {}
+        self.loss_label.set_text(
+            "Paket hilang: " + (
+                f"{loss.get('samples_missing', 0)} sampel ({loss.get('samples_missing_percent', 0.0):.1f} %) "
+                f"dalam {loss.get('sample_jumps', 0)} lompatan · ±{loss.get('msg_missing', 0)} pesan · "
+                f"gap_before dari perangkat: {loss.get('gap_before_packets', 0)}" if loss else "belum ada data")
+            + "\nGap yang dilaporkan perangkat tidak menangkap kehilangan di jaringan; host menghitung lompatan sendiri.")
         self.recording.set_text(f"Recorder  {recorder_state}   |   {_value(s.get('recording_path'))}\n"
                                 f"Preview errors (never affect the RAW file): {s.get('preview_errors', 0)}")
         ready = bool(self._config_ready())
@@ -702,8 +742,10 @@ class EngineeringWindow(QtWidgets.QMainWindow):
         self.apply_live_button.setEnabled(not self._pending and not self._closing_window)
         self.panel.set_geometry_note(
             ("Geometry DRAFT: distances and mapping are not final. " if s.get("geometry_draft") else "")
-            + "Limits: ON/OFF come from reported scheduled phases (ON_STABLE/OFF_STABLE), not a "
-              "device-verified LED state. Evidence thresholds are provisional.")
+            + ("Label 5/8 mm pada short channel belum terverifikasi: pada bench 9 Nov SC2 (8 mm) "
+               "jenuh dan SC1 (5 mm) tidak, mungkin tertukar. " if s.get("geometry_draft") else "")
+            + "ON/OFF dari fase terjadwal (ON_STABLE/OFF_STABLE), bukan status LED yang diverifikasi "
+              "perangkat. Ambang kualitas dipilih host dan σ derau diestimasi online.")
         self._render_diagnostics(context)
         self._sync_destination()
 

@@ -6,6 +6,7 @@ log10 forward model, plain Gauss elimination).
 
 import math
 import random
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
@@ -21,7 +22,9 @@ from noctinirs_host.preview.mbll import LN10, mbll_delta
 from noctinirs_host.preview.od import optical_density
 from noctinirs_host.preview.params import (LEGACY_PREVIEW_EXTINCTION, DpfSetting, ExtinctionTable,
                                            PreviewConfig, resolve_dpf)
-from noctinirs_host.preview.pipeline import BASELINE, INVALID, SSR_WARMUP, VALID, PreviewPipeline
+from noctinirs_host.preview import quality as Q
+from noctinirs_host.preview.pipeline import (BASELINE, INVALID, LEAK_WARN, LOW_SIGNAL, SSR_WARMUP, VALID,
+                                              PreviewPipeline)
 from noctinirs_host.preview.shortsep import RollingRegressor, fit_beta
 from noctinirs_host.wire.envelope import parse_envelope
 from noctinirs_host.wire.optical import parse_raw
@@ -129,7 +132,7 @@ def test_parameters_are_validated_and_carry_status():
     meta = PreviewConfig().to_metadata()
     assert meta["extinction"]["status"] == "unverified" and meta["dpf"]["status"] == "unverified"
     assert meta["extinction"]["source"] and meta["dpf"]["source"]
-    assert "PREVIEW" in meta["label"] and meta["evidence_thresholds"]["status"] == "provisional_unmeasured"
+    assert "PREVIEW" in meta["label"] and meta["quality"]["status"].startswith("host_chosen")
 
 
 # ---- DPF --------------------------------------------------------------------------------
@@ -215,7 +218,8 @@ def test_median_baseline_waits_for_duration_ignores_invalid_and_resets():
 
 # ---- RAW -> preview chain ---------------------------------------------------------------
 
-def run_pipeline(config=None, cycles=40, fs=10, **fake):
+def run_pipeline(config=None, cycles=40, fs=10, mutate=None, **fake):
+    """Feed fake RAW cycles. `mutate(cycle, slot, phase, ain)` may return changed AIN counts."""
     f = EngineeringFake(geometry=GEOMETRY, **fake)
     f.fs_hz = fs
     pl = PreviewPipeline(GEOMETRY, config or PreviewConfig(baseline_s=1.0), fs)
@@ -224,7 +228,13 @@ def run_pipeline(config=None, cycles=40, fs=10, **fake):
         if c in fake.get("drop_cycles", ()):
             continue
         for wire in f._cycle_packets(c, c / fs):
-            frames += pl.feed(parse_raw(parse_envelope(wire).payload), int(c * 1e6 / fs))
+            env = parse_envelope(wire)
+            raw = parse_raw(env.payload)
+            if mutate is not None:
+                raw = replace(raw, samples=tuple(
+                    replace(x, ain=tuple(mutate(c, x.slot_index, x.phase_class, list(x.ain)) or x.ain))
+                    for x in raw.samples))
+            frames += pl.feed(raw, int(c * 1e6 / fs), env.msg_sequence)
     frames += pl.flush()
     return pl, frames
 
@@ -240,20 +250,129 @@ def test_all_channels_become_valid_and_physiology_is_finite():
     assert any("not device-verified" in s or "does not verify" in s for s in pl.provenance()["limits"])
 
 
-def test_dead_saturated_and_leaking_channels_are_invalid_gaps_never_zero():
-    _, frames = run_pipeline(dead_slots=frozenset({4, 5}), saturate=frozenset({(6, 3)}),
-                             leak={0: 500.0})
-    last = frames[-1].points
-    assert last["CH3"].state == INVALID and "NO_LED_STEP" in last["CH3"].reason
-    assert last["CH5"].state == INVALID and "SATURATED" in last["CH5"].reason
-    # slot 0/1 (source L1) leaks to the opposite side detectors -> SC1L/SC2L excluded
+def test_dead_slot_is_invalid_or_flagged_low_signal_never_plain_valid_or_zero():
+    _, frames = run_pipeline(dead_slots=frozenset({4, 5}), cycles=60)
+    seen_invalid = seen_low = 0
+    for fr in frames:
+        p = fr.points["CH3"]
+        assert p.d_hbo != 0.0 or math.isnan(p.d_hbo)
+        if p.state == INVALID:
+            seen_invalid += 1
+            assert all(math.isnan(v) for v in (p.d_hbo, p.d_hbr, p.od735, p.od850))
+        elif p.state == VALID:
+            assert "LOW_SIGNAL" in p.warnings        # a value with no usable signal is always flagged
+            seen_low += 1
+    assert seen_invalid and seen_low
+
+
+def test_saturation_near_rail_and_flat_top_are_invalid():
+    rail = Q.ADC_RAIL
+    on = lambda ph: ph in (3, 4)  # noqa: E731
+
+    def near_rail(c, slot, phase, ain):      # slot 6 AIN 3 just under the rail, never exactly at it
+        if slot in (6, 7) and on(phase):
+            ain[3] = int(0.98 * rail)
+        return ain
+
+    def flat_top(c, slot, phase, ain):       # slot 8 AIN 3 identical samples at a high level
+        if slot in (8, 9) and on(phase):
+            ain[3] = int(0.5 * rail)
+        return ain
+
+    _, frames = run_pipeline(mutate=near_rail, cycles=30)
+    assert frames[-2].points["CH5"].state == INVALID and "SATURATED" in frames[-2].points["CH5"].reason
+    _, frames = run_pipeline(mutate=flat_top, cycles=30)
+    assert frames[-2].points["CH7"].state == INVALID and "SATURATED" in frames[-2].points["CH7"].reason
+    assert frames[-2].points["CH1"].state == VALID
+
+
+def test_exact_rail_samples_are_saturated():
+    _, frames = run_pipeline(saturate=frozenset({(6, 3)}), cycles=30)
+    assert frames[-2].points["CH5"].state == INVALID and "SATURATED" in frames[-2].points["CH5"].reason
+
+
+def test_leak_is_a_warning_per_ain_and_invalid_only_when_large():
+    _, small = run_pipeline(leak={0: 500.0}, cycles=60)        # 0.8 % of the same-side step
+    last = small[-2].points
+    assert last["SC1L"].state == VALID and LEAK_WARN in last["SC1L"].warnings
+    assert last["CH1"].state == VALID and LEAK_WARN not in last["CH1"].warnings
+    _, large = run_pipeline(leak={0: 20000.0}, cycles=60)     # above 10 % of the same-side step
+    last = large[-2].points
     assert last["SC1L"].state == INVALID and "LEAK_SUSPECT" in last["SC1L"].reason
-    assert last["CH1"].state == VALID
-    for name in ("CH3", "CH5", "SC1L"):
-        for fr in frames:
-            p = fr.points[name]
-            if p.state == INVALID:
-                assert all(math.isnan(v) for v in (p.d_hbo, p.d_hbr, p.d_hbt, p.od735, p.od850))
+    assert last["CH1"].state == VALID                         # another AIN is not dropped for it
+
+
+def test_leak_never_invalidates_before_sigma_is_known():
+    _, frames = run_pipeline(leak={0: 20000.0}, cycles=4)
+    assert all("LEAK_SUSPECT" not in fr.points["SC1L"].reason for fr in frames)
+
+
+def test_sigma_is_estimated_online_and_saved():
+    pl, frames = run_pipeline(cycles=40)
+    prov = pl.provenance()
+    sig = prov["noise_sigma_counts"]
+    assert sig and all(0 < v < 30 for v in sig.values())
+    assert prov["quality_constants"]["LOW_SIGNAL_SIGMA"] == Q.LOW_SIGNAL_SIGMA
+    p = frames[-2].points["CH1"]
+    assert p.sigma735 > 0 and p.snr735 > 100
+
+
+def test_low_signal_is_a_warning_and_the_value_is_still_shown():
+    def weak(c, slot, phase, ain):           # CH1 = source L2 (slots 2,3), AIN 3: step of about 3 counts
+        if slot in (2, 3):
+            noise = (c * 37 + phase * 11 + slot) % 5 - 2
+            ain[3] = 1800 + 90 * 3 + noise + (3 if phase in (3, 4) else 0)
+        return ain
+
+    _, frames = run_pipeline(mutate=weak, cycles=60)
+    shown = [fr.points["CH1"] for fr in frames if fr.points["CH1"].state == VALID]
+    assert shown and all(LOW_SIGNAL in p.warnings and math.isfinite(p.d_hbo) for p in shown)
+
+
+def test_ambient_jump_is_invalid_and_a_sustained_shift_is_accepted_later():
+    def event(c, slot, phase, ain):          # a bright-room event on every AIN for 6 cycles
+        return [v + 500_000 for v in ain] if 25 <= c < 31 and phase in (3, 4, 6, 7) else None
+
+    _, frames = run_pipeline(mutate=event, cycles=50)
+    assert all("AMBIENT_HIGH" in frames[c].points["CH1"].reason for c in range(26, 30))
+    assert frames[40].points["CH1"].state == VALID           # normal again after the event
+
+    def shift(c, slot, phase, ain):          # the whole level moves and stays there
+        return [v + 500_000 for v in ain] if c >= 25 and phase in (3, 4, 6, 7) else None
+
+    _, frames = run_pipeline(mutate=shift, cycles=80)
+    assert "AMBIENT_HIGH" in frames[27].points["CH1"].reason
+    assert frames[75].points["CH1"].state == VALID           # accepted after AMBIENT_ACCEPT_AFTER cycles
+
+
+def test_invalid_counts_are_taken_after_ssr_and_mbll():
+    singular = ExtinctionTable({"735": {"HbO": 1.0, "HbR": 2.0}, "850": {"HbO": 1.0, "HbR": 2.0}}, "x")
+    pl, frames = run_pipeline(PreviewConfig(baseline_s=0.5, extinction=singular), cycles=30)
+    after = [fr for fr in frames if fr.points["CH1"].reason.startswith("MBLL")]
+    assert after and pl.invalid_counts["CH1"] >= len(after)
+    assert pl.provenance()["invalid_reason_counts"]["CH1"]["MBLL"] >= len(after)
+
+
+def test_loss_counters_count_missing_samples_and_messages():
+    pl, _ = run_pipeline(drop_cycles=frozenset({10, 11}), cycles=30)
+    loss = pl.loss_stats()
+    assert loss["samples_missing"] == 400 and loss["sample_jumps"] == 1
+    assert loss["gap_before_packets"] == 0
+    assert loss["samples_missing_percent"] == pytest.approx(100 * 400 / (28 * 200 + 400))
+    clean, _ = run_pipeline(cycles=10)
+    assert clean.loss_stats()["samples_missing"] == 0 and clean.loss_stats()["msg_missing"] == 0
+
+
+def test_message_sequence_gaps_are_counted():
+    pl = PreviewPipeline(GEOMETRY, PreviewConfig(baseline_s=1.0), 10)
+    f = EngineeringFake(geometry=GEOMETRY)
+    f.fs_hz = 10
+    packets = [parse_raw(parse_envelope(w).payload) for w in f._cycle_packets(0, 0.0)]
+    pl.feed(packets[0], 0, 5)
+    pl.feed(packets[1], 1, 9)                 # messages 6, 7, 8 never arrived
+    assert pl.loss_stats()["msg_missing"] == 3
+    pl.feed(packets[1], 2, 0xFFFFFFFF)        # a wrap or reorder is not counted as a huge loss
+    assert pl.loss_stats()["msg_missing"] == 3
 
 
 def test_missing_second_wavelength_makes_channel_invalid():
@@ -294,24 +413,24 @@ def test_time_axis_uses_host_receive_time():
     assert ts[-1] == pytest.approx(1.1, abs=0.11)
 
 
-def test_short_separation_is_explicit_about_warmup_and_state():
+def test_short_separation_shows_uncorrected_while_warming_then_applied():
     cfg = PreviewConfig(baseline_s=0.5, ssr_mode="8mm", ssr_min_samples=30)
     _, frames = run_pipeline(cfg, cycles=80)
-    states = [fr.points["CH1"].state for fr in frames]
-    assert SSR_WARMUP in states and states[-1] == VALID
-    assert states.index(SSR_WARMUP) < len(states) - states[::-1].index(SSR_WARMUP)
-    last = frames[-1].points["CH1"]
-    assert last.ssr_applied and last.ssr_beta
-    warm = next(fr.points["CH1"] for fr in frames if fr.points["CH1"].state == SSR_WARMUP)
-    assert math.isnan(warm.d_hbo)  # no silent raw -> corrected switch: warm-up shows no value
+    pts = [fr.points["CH1"] for fr in frames if fr.points["CH1"].state == VALID]
+    assert pts[0].ssr_state == "UNCORRECTED" and math.isfinite(pts[0].d_hbo)   # shown, not hidden
+    assert any("warming up" in p.ssr_reason for p in pts)
+    assert pts[-1].ssr_state == "applied" and pts[-1].ssr_applied and pts[-1].ssr_beta
+    assert all(p.state != SSR_WARMUP for p in pts)
 
 
-def test_ssr_requires_valid_short_channel():
+def test_invalid_or_weak_short_channel_gives_uncorrected_long_channel_not_a_gap():
     cfg = PreviewConfig(baseline_s=0.5, ssr_mode="5mm", ssr_min_samples=10)
-    _, frames = run_pipeline(cfg, cycles=30, dead_slots=frozenset({0, 1}))   # SC1L / SC2L dead
-    left = frames[-1].points["CH1"]
-    assert left.state == INVALID and left.reason == "NO_SHORT_REGRESSOR"
-    assert frames[-1].points["CH9"].state == VALID  # right hemisphere uses SC1R
+    pl, frames = run_pipeline(cfg, cycles=40, dead_slots=frozenset({0, 1}))   # SC1L / SC2L dead
+    left = frames[-2].points["CH1"]
+    assert left.state == VALID and left.ssr_state == "UNCORRECTED" and "SC1L" in left.ssr_reason
+    assert math.isfinite(left.d_hbo)
+    assert frames[-2].points["CH9"].ssr_state == "applied"    # right hemisphere uses SC1R
+    assert pl.uncorrected_counts["CH1"] > 0 and pl.invalid_counts.get("CH1", 0) < 5
 
 
 def test_live_config_change_resets_what_it_touches_and_is_logged():

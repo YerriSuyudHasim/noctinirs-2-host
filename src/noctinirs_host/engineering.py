@@ -462,11 +462,11 @@ class EngineeringRun:
             self.recorder.event("preview_baseline_reset", "PREVIEW baseline reset by operator")
         self._event("PREVIEW baseline reset.")
 
-    def _preview_feed(self, raw, host_us: int) -> None:
+    def _preview_feed(self, raw, host_us: int, msg_sequence: int | None = None) -> None:
         if self.preview is None:
             return
         try:
-            self._preview_out.extend(self.preview.feed(raw, host_us))
+            self._preview_out.extend(self.preview.feed(raw, host_us, msg_sequence))
         except Exception:  # preview faults must not disturb capture or recording
             self.preview_errors += 1
 
@@ -499,7 +499,7 @@ class EngineeringRun:
         self.latest_raw = {"sample": raw.samples[-1], "first_device_us": env.timestamp_us,
                            "host_us": host_us, "estimated": env.ts_estimated,
                            "simulated": env.simulated, "epoch": raw.slot_plan_epoch}
-        self._preview_feed(raw, host_us)
+        self._preview_feed(raw, host_us, env.msg_sequence)
 
     def disconnect(self) -> None:
         if self._closing is not None:
@@ -695,6 +695,7 @@ class EngineeringRun:
             "log": tuple(self.log),
             "battery": self._battery_view(),
             "preview_new": self._drain_preview(), "preview_errors": self.preview_errors,
+            "preview_loss": self.preview.loss_stats() if self.preview is not None else {},
             "preview_active": self.preview_active, "preview_epoch": self.preview_epoch,
             "preview_config": self.preview_config,
             "preview_limits": self.preview.provenance()["limits"] if self.preview else (),
