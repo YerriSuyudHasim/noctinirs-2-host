@@ -189,3 +189,15 @@ it compares archive size and SHA-256. The derived CSV is not read during RAW
 replay. Replay streams one record at a time, with a fixed continuity window
 and an 8 MiB JSON read cap. Iterating without retaining the yielded packets
 keeps memory use independent of capture length.
+
+## D2 desktop naming and preview provenance
+
+The desktop (Stage D2) records into `Documents
+octinirs\<YYYY-MM-DD>` as
+`record_<X>`, where X is one more than the highest `record_<X>` already in the
+folder. Existing files are never replaced. When a preview ran, the sidecar
+`settings_at_start.preview` holds the preview configuration at arm time and a
+separate `record_<X>.preview.json` holds every configuration change, baseline
+reset and the stated limits. The RAW archive and its CSV never contain preview
+values. The preview is not validated and is not science data.
+
