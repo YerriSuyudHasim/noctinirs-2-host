@@ -13,10 +13,9 @@ import sys
 import time
 
 from .control.engineering_fake import EngineeringFake
-from .control.profile import (profile_attribution, profile_codes_event_text, profile_event_text,
-                              profile_ids_event_text, profile_summary)
+from .control.profile import profile_attribution, profile_codes_event_text, profile_event_lines, profile_summary
 from .control.protocol import ST_SAFE_OFF, ST_STARTING, ST_STOPPED, ST_STOPPING, ST_STREAMING
-from .control.session import LoopbackTransport, SessionController
+from .control.session import PROFILE_TIMEOUT_S, LoopbackTransport, SessionController
 from .control.udp import UDPTransport
 from .geometry import Geometry
 from .preview.params import PreviewConfig
@@ -33,8 +32,12 @@ STOP_WAIT_S = 5.0
 # after SAFE_OFF is therefore deferred. 1.0 s matches the firmware STOP evidence deadline
 # (CONTROL_STOP_EVIDENCE_DEADLINE_US); it is an assumption, not a bench measurement. The read is still one
 # send with the 0.4 s profile timeout; if it is not allowed before the limit, a "not read" event is written.
+# H-05a: both times count from the FIRST SAFE_OFF ACK of the recording; a repeated ACK never moves them.
+# The limit is a FINISH bound (fail closed): the read is started only while its whole PROFILE_TIMEOUT_S wait
+# still ends by the limit, so no reply is awaited past 3.0 s after the first ACK.
 SAFE_OFF_PROFILE_DELAY_S = 1.0
 SAFE_OFF_PROFILE_LIMIT_S = 3.0
+_FROM_RUN = object()      # H-01a: `_profile_query(candidate=...)` omitted -> the run's id; None = explicitly none
 RECORD_STEM = "record_"
 _RECORD_FILE = re.compile(r"^record_(\d+)(\.json|\.csv|\.raw\.bin|\.raw\.csv|\.preview\.json)$")
 
@@ -302,6 +305,7 @@ class EngineeringRun:
         if self._job is not None or self.recorder is not None or target != self.checked_target:
             raise ValueError("Check an unused recording destination before arming.")
         ctl = self.controller
+        self._reset_run_context("new recording armed")      # H-01a: a previous run never labels this recording
         context = self._observe(verify_config=True, profile_phase="armed")
         self._require_ready()
         if context["observed_info"]["source"] != "INFO" or context["firmware_status"] is None:
@@ -321,6 +325,15 @@ class EngineeringRun:
         self.recorder_state = "OPENING"
         self.checked_target = None  # Recorder exclusively creates the files; check again for reuse.
         self._job = self._disk.submit(self.recorder.start, raw_context=context)
+
+    def _reset_run_context(self, why: str) -> None:
+        """H-01a: forget the previous run's session id, its pending profile reads and any deferred SAFE_OFF
+        read before a new recording cycle, so nothing of that run is written into the new sidecar."""
+        if self._deferred_profile is not None:
+            self._event(f"LED profile (after_safe_off): not read ({why} first)")
+        self._deferred_profile = None
+        self._session_id = None
+        self._await_running = self._await_end = False
 
     def start(self) -> None:
         self._require_ready()
@@ -433,14 +446,21 @@ class EngineeringRun:
         recording = self.recorder is not None and self.recorder_state in ("ARMED", "RECORDING")
         if recording:
             # H-05: the ACK is its own event; the STOP evidence is written by the firmware after cleanup
+            pending = self._deferred_profile is not None
             self.recorder.event("safe_off", (
                 f"SAFE_OFF ACK reply_session={reply.session_id} reply_state={reply.state_text} "
                 f"boot=0x{reply.boot_id:X}; STOP evidence is recorded by the firmware after its cleanup; "
-                f"one get-profile read deferred {SAFE_OFF_PROFILE_DELAY_S:g} s"
+                + ("repeated ACK: the first ACK's deferred get-profile schedule is kept" if pending else
+                   f"one get-profile read deferred {SAFE_OFF_PROFILE_DELAY_S:g} s")
                 + (" (link lost: no read possible)" if not self.connected else ""))[:500])
+        if self._deferred_profile is not None and self.connected:
+            # H-05a: a repeated ACK neither shifts the due time or the finish bound nor adds a read
+            self._await_end = self._await_running = False
+            return
         candidate = self._session_id if self._await_end else None
         self._await_end = self._await_running = False
         if not self.connected:
+            self._deferred_profile = None
             if recording:
                 self.recorder.event("profile", "phase=after_safe_off not read: no live link")
                 self._finalize(ctl.recording_snapshot())
@@ -473,7 +493,7 @@ class EngineeringRun:
         self._finalize(self._observe(profile_phase="ended"))
 
     # ---- LED calibration profile report (read-only) ------------------------------------------------
-    def _profile_query(self, phase: str, *, candidate: int | None = None) -> bool:
+    def _profile_query(self, phase: str, *, candidate=_FROM_RUN) -> bool:
         """Read get-profile once and remember it for the status area; when a recorder is open, write what the
         device reported (or that it could not be read) as sidecar events. False = not allowed right now
         (nothing was sent; the caller may try again later). A missing, old or odd reply never fails the
@@ -482,7 +502,10 @@ class EngineeringRun:
         H-01: the report is device-wide. It is attributed to this run only when the request carried the live
         owned session id and the reply reports that same id (`basis=owner`). A reply naming another session
         is a device diagnostic (`basis=foreign`, sidecar kind `profile_device`, no `session=`). Session 0
-        after this run ended is `basis=detached`: unattributed, with the run's id only as a candidate."""
+        after this run ended is `basis=detached`: unattributed, with the run's id only as a candidate.
+
+        H-01a: `candidate` omitted means "this run's id" (`_session_id`); an explicit None means that no
+        run of this recording can be named and is never replaced by `_session_id`."""
         ctl = self.controller
         if ctl is None or not ctl.profile_enabled or not self.connected:
             return False
@@ -497,8 +520,8 @@ class EngineeringRun:
         reply_state = None
         if reply is not None:
             provenance = profile_attribution(reply.session_id, sent_session=sent_session, phase=phase,
-                                             candidate_session=candidate if candidate is not None
-                                             else self._session_id)
+                                             candidate_session=self._session_id if candidate is _FROM_RUN
+                                             else candidate)
             reply_state = reply.state_text
         self.profile_view = {"phase": phase, "report": report, "failure": failure,
                              "boot_id": ctl.boot_id, "provenance": provenance, "reply_state": reply_state}
@@ -512,13 +535,14 @@ class EngineeringRun:
             else:
                 epoch = self.latest_raw.get("epoch")
                 boot = reply.boot_id if reply is not None else ctl.boot_id
-                line = profile_event_text(
+                lines = profile_event_lines(
                     report, phase=phase, boot_id=boot, plan_epoch=epoch,
                     provenance=provenance or {"attributed": False, "basis": "no_session", "reply_session": 0},
                     reply_state=reply_state)
-                self.recorder.event(kind, line)
-                if "=in_profile_ids" in line:
-                    self.recorder.event(kind + "_ids", profile_ids_event_text(report, phase=phase))
+                # H-02a: the follow-ons come from the same structured result, never from scanning the text
+                self.recorder.event(kind, lines.main)
+                for ids in lines.ids:
+                    self.recorder.event(kind + "_ids", ids)
                 codes = profile_codes_event_text(report)
                 if codes and not foreign:
                     self.recorder.event("profile_codes", codes)
@@ -527,7 +551,8 @@ class EngineeringRun:
     def _deferred_follow(self) -> None:
         """H-05: the one get-profile after SAFE_OFF, once the firmware has had time to record its STOP
         evidence. Then the recording (if any) is finalized. Bounded: one send at most, and a "not read"
-        event when the read is not allowed before the limit or the link is gone."""
+        event when the read is not allowed before the limit or the link is gone. H-05a: the limit is a finish
+        bound; a read whose PROFILE_TIMEOUT_S wait could end after it is not started (fail closed)."""
         d = self._deferred_profile
         if d is None:
             return
@@ -535,7 +560,7 @@ class EngineeringRun:
         if self.connected and now < d["due"]:
             return
         done = False
-        if self.connected and now < d["limit"]:
+        if self.connected and now + PROFILE_TIMEOUT_S <= d["limit"]:
             done = self._profile_query("after_safe_off", candidate=d["candidate"])
             if not done:
                 return                          # not allowed right now; nothing was sent
@@ -543,7 +568,7 @@ class EngineeringRun:
         recording = self.recorder is not None and self.recorder_state in ("ARMED", "RECORDING")
         if not done:
             reason = "no live link" if not self.connected else \
-                f"not allowed within {SAFE_OFF_PROFILE_LIMIT_S:g} s of SAFE_OFF"
+                f"could not finish within {SAFE_OFF_PROFILE_LIMIT_S:g} s of the first SAFE_OFF ACK"
             self._event(f"LED profile (after_safe_off): not read ({reason})")
             if recording:
                 self.recorder.event("profile", f"phase=after_safe_off not read: {reason}")

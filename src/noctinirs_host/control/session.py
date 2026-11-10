@@ -736,10 +736,13 @@ class SessionController:
     def query_profile(self) -> CommandResult:
         """Read-only LED profile report (opcode 0x0034). Never changes the host's session or state.
 
-        Lease: the firmware (patch 0004, nn2_app_comm.c) checks lease expiry before it answers, and a
-        successful GET_PROFILE that carries the current owner's session id refreshes the owner activity
-        anchor like any successful owner request; with session id 0 it does not. The host does not count
-        the query as a heartbeat and leaves its own heartbeat schedule unchanged.
+        Lease (FIX2 amendment 2026-11-10, patch 0004, nn2_app_comm.c): the firmware checks lease expiry
+        before it answers. Its stale-session guard refuses only a nonzero session id that is not the current
+        one, and GET_PROFILE is answered to any peer. The owner activity anchor is refreshed when the
+        request succeeded and came from the owner endpoint (c.owner == peer), whatever session id it carried:
+        a session-0 GET_PROFILE from the owner endpoint therefore CAN refresh the firmware lease, while a
+        foreign peer carrying the active id does not. The host does not count the query as a heartbeat and
+        never advances its own heartbeat schedule because of it.
 
         Identity: the report is device-wide. The reply's session id is the device's current session (which
         may be another endpoint's) and is returned in `CommandResult.reply` for attribution by the caller;

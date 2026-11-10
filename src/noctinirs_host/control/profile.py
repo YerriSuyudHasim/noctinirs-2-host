@@ -14,10 +14,14 @@ Pinned source (the host does not extend the protocol; changes are raised in `noc
   "local amendment (Stage 1 calibration FIX2) 2026-11-10" (patch 0004; Status stays Proposed), which
   amends the FIX1 revision of the same date. The series is not committed in the firmware repository yet,
   so there is no commit SHA: the patch hashes above identify the contract.
-Lease (nn2_app_comm.c in patch 0004): GET_PROFILE is answered to every peer (a device-wide report). A
-  request that carries the current owner's session id refreshes that owner's activity anchor like any
-  successful owner request; a request with session id 0 does not. The reply's session id is the device's
-  CURRENT session, which may belong to another endpoint, and no key binds the report to one session.
+Lease (nn2_app_comm.c in patch 0004, FIX2 amendment 2026-11-10): GET_PROFILE is answered to every peer
+  (a device-wide report). The stale-session guard refuses only a NONZERO session id that is not the current
+  one. After a request is accepted, the firmware refreshes the owner's activity anchor when the request
+  succeeded and came from the OWNER ENDPOINT (c.owner == peer); the session id in the request does not
+  decide it. So a GET_PROFILE with session id 0 from the owner endpoint CAN refresh the lease, and a foreign
+  peer carrying the active id does not. The host never advances its own heartbeat schedule because of a
+  GET_PROFILE. The reply's session id is the device's CURRENT session, which may belong to another
+  endpoint, and no key binds the report to one session.
 Not verified against a device. The text format was taken from the patch sources and the FIX1 report.
 
 Wire format (text, ASCII, `key=value` separated by single spaces; no value contains a space):
@@ -31,8 +35,13 @@ Clients must ignore unknown keys (ADR-0004 section 15); this parser does, and ke
 
 Integrity (fail closed): the effective stop integrity is OK only for stop_evidence=VALID_MATCH with
 stop_integrity=OK, stop_match=1 and stop_error=0 (as FIX2 emits it), and only when none of the
-integrity keys (INTEGRITY_KEYS) was sent twice. Every occurrence of those keys is kept verbatim in
-`raw_integrity` for investigation.
+integrity keys (INTEGRITY_KEYS) was sent twice. Every occurrence of those keys is kept in `raw_integrity`
+for investigation (a value longer than RAW_VALUE_LIMIT characters is shortened with an explicit
+`~len=N` marker; no occurrence is dropped).
+
+Sidecar (H-02a): `profile_event_lines` builds the main event and its `*_ids` follow-on events as one
+structured result. The main line is shrunk by moving whole fields to the follow-ons (with an explicit
+`...=in_profile_ids` marker) and is never sliced; hashes and raw values are never cut mid-token.
 """
 
 from __future__ import annotations
@@ -86,6 +95,7 @@ KNOWN_KEYS = (("profile_state", "profile_armed", "profile_id", "profile_hash", "
                "iref_code_max"))
 _REMOVED_KEYS = ("stop_read",)       # present in the pre-FIX1 series (0001/0002); ignored, not an error
 MAX_EXTRA = 64
+RAW_VALUE_LIMIT = 400      # a raw integrity value longer than this is kept as value[:400] + "~len=N"
 
 
 @dataclass(frozen=True)
@@ -199,8 +209,9 @@ def parse_profile(ext: bytes | str) -> ProfileReport:
         if not eq or not key:
             warnings.append(f"token without key=value: {token[:24]!r}")
             continue
-        if key in INTEGRITY_KEYS and len(raw_integrity) < 16:
-            raw_integrity.append((key, value[:24]))
+        if key in INTEGRITY_KEYS:          # every occurrence (bounded by MAX_TEXT), never silently cut
+            raw_integrity.append((key, value if len(value) <= RAW_VALUE_LIMIT
+                                  else f"{value[:RAW_VALUE_LIMIT]}~len={len(value)}"))
         if key in values or any(k == key for k, _ in unknown):
             warnings.append(f"duplicate key {key[:32]}")
             if key in INTEGRITY_KEYS and f"duplicate:{key}" not in issues:
@@ -366,15 +377,83 @@ def profile_attribution(reply_session: int, *, sent_session: int = 0, phase: str
     return {"attributed": False, "basis": "no_session", "reply_session": 0}
 
 
-def profile_event_text(report: ProfileReport, *, phase: str, boot_id: int | None = None,
-                       session_id: int | None = None, plan_epoch: int | None = None,
-                       provenance: dict | None = None, reply_state: str | None = None) -> str:
-    """One compact sidecar line (<= EVENT_LIMIT characters). `phase` says when it was read. With
-    `provenance` (from `profile_attribution`) the line says explicitly whether the report is attributed to
-    the run (`attributed=1 basis=owner session=N`) or not (`attributed=0 basis=foreign|detached|no_session`,
-    with `reply_session` and, for detached, `candidate_session`); `session=` is then written only when the
-    report is attributed. Without `provenance` the older form (`session=` as given) is kept. Identity and
-    integrity come first; the hash fields close the line; code vectors go to `profile_codes_event_text`."""
+@dataclass(frozen=True)
+class ProfileEvent:
+    """One get-profile report as sidecar text: the main event (`profile` / `profile_device`) and its ordered
+    follow-on `*_ids` events. Every text is <= EVENT_LIMIT characters and none was sliced. The caller writes
+    `main` and then every entry of `ids`, without looking inside the text (H-02a)."""
+    main: str
+    ids: tuple = ()
+
+
+_ENUM_SHOWN = 32           # an enum value longer than this is a malformed report; the main line shows a stub
+
+
+def _ids_lines(phase: str, groups: list) -> tuple:
+    """Pack (prefix, items) groups into bounded `phase=P ids=i/n ...` lines. Items are joined with "," after
+    the prefix (e.g. `raw_integrity=`), or written as separate tokens when the prefix is None. An item is
+    never split: it always fits a fresh line (hashes are 64 characters, issue names are short, raw values
+    are bounded by RAW_VALUE_LIMIT). A group that continues on the next line repeats its prefix there, so
+    the readers concatenate the values of the same key in `ids` order."""
+    budget = EVENT_LIMIT - len(f"phase={phase} ids=99/99 ")
+    bodies: list = []
+    current = ""
+
+    def push(token: str) -> None:
+        nonlocal current
+        if current and len(current) + 1 + len(token) <= budget:
+            current += " " + token
+        else:
+            if current:
+                bodies.append(current)
+            current = token
+
+    for prefix, items in groups:
+        items = list(items)
+        if prefix is None:                      # separate `key=value` tokens
+            for item in items:
+                push(item)
+            continue
+        while items:
+            room = budget - (len(current) + 1 if current else 0)
+            token, used = prefix, 0
+            for item in items:
+                candidate = token + ("," if used else "") + item
+                if len(candidate) > room:
+                    break
+                token, used = candidate, used + 1
+            if used == 0:
+                if current:                     # start a fresh line and retry
+                    bodies.append(current)
+                    current = ""
+                    continue
+                token, used = prefix + items[0], 1      # cannot happen within the documented bounds
+            push(token)
+            items = items[used:]
+    if current:
+        bodies.append(current)
+    n = len(bodies)
+    return tuple(f"phase={phase} ids={i}/{n} {body}" for i, body in enumerate(bodies, 1))
+
+
+def profile_event_lines(report: ProfileReport, *, phase: str, boot_id: int | None = None,
+                        session_id: int | None = None, plan_epoch: int | None = None,
+                        provenance: dict | None = None, reply_state: str | None = None) -> ProfileEvent:
+    """The sidecar events for one report. `phase` says when it was read. With `provenance` (from
+    `profile_attribution`) the main line says explicitly whether the report is attributed to the run
+    (`attributed=1 basis=owner session=N`) or not (`attributed=0 basis=foreign|detached|no_session`, with
+    `reply_session` and, for detached, `candidate_session`); `session=` is then written only when the report
+    is attributed. Without `provenance` the older form (`session=` as given) is kept. Identity and integrity
+    come first; the hash fields close the line; code vectors go to `profile_codes_event_text`.
+
+    H-02a: when the full main line would exceed EVENT_LIMIT, whole optional fields move, in this order, to the
+    follow-on `ids` events, each leaving a marker on the main line: the hashes (`hashes=in_profile_ids`), the
+    raw integrity values (`raw_integrity=in_profile_ids`), the integrity issue list
+    (`integrity_issues=in_profile_ids`) and the unknown key names (`unknown_keys=in_profile_ids`); if it is
+    still too long, identity fields follow one by one (`fields=in_profile_ids`, see _MOVABLE) while the
+    session/boot identity and the stop_* integrity fields stay on the main line. Nothing is sliced; the
+    follow-ons (`ids=i/n`, so a reader sees that all n are present) hold both full hashes and
+    every raw integrity occurrence, split over as many bounded events as needed."""
     head = [f"phase={phase}"]
     if provenance is not None:
         head.append(f"attributed={int(bool(provenance.get('attributed')))}")
@@ -396,10 +475,13 @@ def profile_event_text(report: ProfileReport, *, phase: str, boot_id: int | None
     if not report.supported:
         text = " ".join(head + ["supported=0", f"reason={report.reason}"] +
                         [f"warning={w}" for w in report.warnings[:2]])
-        return text[:EVENT_LIMIT]
+        return ProfileEvent(text[:EVENT_LIMIT])
 
     def fmt(value, none="-"):
-        return none if value is None else str(value)
+        if value is None:
+            return none
+        value = str(value)
+        return value if len(value) <= _ENUM_SHOWN else f"{value[:_ENUM_SHOWN]}~len={len(value)}"
 
     def hexid(value):
         return "-" if value is None else f"0x{value:08X}"
@@ -407,52 +489,108 @@ def profile_event_text(report: ProfileReport, *, phase: str, boot_id: int | None
     def flag(value):
         return "-" if value is None else str(int(value))
 
-    parts = head + [
-        "supported=1", f"state={fmt(report.state)}", f"armed={flag(report.armed)}",
-        f"id={hexid(report.profile_id)}", f"source={fmt(report.source)}",
-        f"start_result={fmt(report.start_result)}", f"mismatch_slot={fmt(report.mismatch_slot)}",
-        f"applied_id={hexid(report.applied_profile_id)}", f"applied_valid={flag(report.applied_valid)}",
-        f"stop_evidence={fmt(report.stop_evidence)}",
-        f"stop_integrity={report.stop_integrity_effective}", f"stop_match={flag(report.stop_match)}",
-        f"stop_slot={fmt(report.stop_slot)}", f"stop_error={fmt(report.stop_error)}"]
-    raw = _raw_integrity_text(report)
-    if report.integrity_issues:
-        parts.append("integrity_issues=" + ",".join(report.integrity_issues[:4]))
-        parts.append(raw)
+    core = [
+        ("supported", "supported=1"), ("state", f"state={fmt(report.state)}"),
+        ("armed", f"armed={flag(report.armed)}"), ("id", f"id={hexid(report.profile_id)}"),
+        ("source", f"source={fmt(report.source)}"), ("start_result", f"start_result={fmt(report.start_result)}"),
+        ("mismatch_slot", f"mismatch_slot={fmt(report.mismatch_slot)}"),
+        ("applied_id", f"applied_id={hexid(report.applied_profile_id)}"),
+        ("applied_valid", f"applied_valid={flag(report.applied_valid)}"),
+        ("stop_evidence", f"stop_evidence={fmt(report.stop_evidence)}"),
+        ("stop_integrity", f"stop_integrity={report.stop_integrity_effective}"),
+        ("stop_match", f"stop_match={flag(report.stop_match)}"),
+        ("stop_slot", f"stop_slot={fmt(report.stop_slot)}"), ("stop_error", f"stop_error={fmt(report.stop_error)}")]
     if report.integrity_blocked:
-        parts.insert(len(head) + 1, "DATA_INTEGRITY_BLOCKED")
-    tail = []
-    if report.unknown:
-        tail.append("unknown_keys=" + ",".join(k for k, _ in report.unknown[:6]))
-    if report.warnings:
-        tail.append(f"warnings={len(report.warnings)}")
-    armed_hash = fmt(report.profile_hash, "none")
-    applied_hash = fmt(report.applied_profile_hash, "none")
-    text = " ".join(parts + [f"hash={armed_hash}", f"applied_hash={applied_hash}"] + tail)
-    if len(text) > EVENT_LIMIT and applied_hash == armed_hash != "none":
-        text = " ".join(parts + [f"hash={armed_hash}", "applied_hash=same"] + tail)
-    if len(text) > EVENT_LIMIT:
-        # never cut a hash: both go to their own `profile_ids` event (profile_ids_event_text)
-        text = " ".join(parts + ["hashes=in_profile_ids"] + tail)
-    if len(text) > EVENT_LIMIT and report.integrity_issues:
-        # the raw integrity values are kept too, in the same `profile_ids` event
-        parts[parts.index(raw)] = "raw_integrity=in_profile_ids"
-        text = " ".join(parts + ["hashes=in_profile_ids"] + tail)
-    return text if len(text) <= EVENT_LIMIT else text[:EVENT_LIMIT - 1] + "."
+        core.insert(1, ("blocked", "DATA_INTEGRITY_BLOCKED"))
+    armed_hash = report.profile_hash or "none"
+    applied_hash = report.applied_profile_hash or "none"
+    raw_items = [f"{k}:{v}" for k, v in report.raw_integrity]
+    issues = list(report.integrity_issues)
+    unknown = [k for k, _ in report.unknown]
+    warnings = [f"warnings={len(report.warnings)}"] if report.warnings else []
+
+    def build(*, hashes: str, raw_out: bool, issues_out: bool, unknown_out: bool, moved=()) -> tuple:
+        parts = head + [t for name, t in core if name not in moved]
+        if issues:
+            parts.append("integrity_issues=" + ("in_profile_ids" if issues_out else ",".join(issues)))
+            parts.append("raw_integrity=" + ("in_profile_ids" if raw_out else ",".join(raw_items)))
+        if hashes == "inline":
+            parts += [f"hash={armed_hash}", f"applied_hash={applied_hash}"]
+        elif hashes == "same":
+            parts += [f"hash={armed_hash}", "applied_hash=same"]
+        else:
+            parts.append("hashes=in_profile_ids")
+        if unknown:
+            parts.append("unknown_keys=" + ("in_profile_ids" if unknown_out else ",".join(unknown[:6])))
+        if "warnings" not in moved:
+            parts += warnings
+        if moved:
+            parts.append("fields=in_profile_ids")
+        groups = []
+        if moved:
+            groups.append((None, [t for name, t in core if name in moved]
+                           + (warnings if "warnings" in moved else [])))
+        if hashes == "out":
+            groups.append((None, [f"hash={armed_hash}", f"applied_hash={applied_hash}"]))
+        if issues_out:
+            groups.append(("integrity_issues=", issues))
+        if raw_out and issues:
+            groups.append(("raw_integrity=", raw_items))
+        if unknown_out and unknown:
+            groups.append(("unknown_keys=", unknown))
+        return " ".join(parts), (_ids_lines(phase, groups) if groups else ())
+
+    same = applied_hash == armed_hash != "none"
+    stages = [dict(hashes="inline", raw_out=False, issues_out=False, unknown_out=False)]
+    if same:
+        stages.append(dict(hashes="same", raw_out=False, issues_out=False, unknown_out=False))
+    stages += [dict(hashes="out", raw_out=False, issues_out=False, unknown_out=False),
+               dict(hashes="out", raw_out=True, issues_out=False, unknown_out=False),
+               dict(hashes="out", raw_out=True, issues_out=True, unknown_out=False),
+               dict(hashes="out", raw_out=True, issues_out=True, unknown_out=True)]
+    for stage in stages:
+        main, ids = build(**stage)
+        if len(main) <= EVENT_LIMIT:
+            return ProfileEvent(main, ids)
+    # Then whole identity fields move too (`fields=in_profile_ids`), least important first. The session /
+    # boot identity, DATA_INTEGRITY_BLOCKED and the five stop_* fields always stay on the main line, which
+    # bounds it (every value there is an int, a bounded enum stub or a fixed name).
+    for k in range(1, len(_MOVABLE) + 1):
+        main, ids = build(**stages[-1], moved=_MOVABLE[:k])
+        if len(main) <= EVENT_LIMIT:
+            break
+    return ProfileEvent(main, ids)
 
 
-def _raw_integrity_text(report: ProfileReport) -> str:
-    return "raw_integrity=" + ",".join(f"{k}:{v}" for k, v in report.raw_integrity[:8])
+# H-02a: the order in which identity fields leave a main line that is still too long
+_MOVABLE = ("warnings", "mismatch_slot", "applied_valid", "armed", "source", "start_result", "supported",
+            "state", "applied_id", "id")
+
+
+def profile_event_text(report: ProfileReport, *, phase: str, boot_id: int | None = None,
+                       session_id: int | None = None, plan_epoch: int | None = None,
+                       provenance: dict | None = None, reply_state: str | None = None) -> str:
+    """The main sidecar line of `profile_event_lines` (<= EVENT_LIMIT characters, never sliced). Callers that
+    write a recorder must use `profile_event_lines` so that the follow-on events are written too."""
+    return profile_event_lines(report, phase=phase, boot_id=boot_id, session_id=session_id,
+                               plan_epoch=plan_epoch, provenance=provenance, reply_state=reply_state).main
+
+
+def profile_ids_event_lines(report: ProfileReport, *, phase: str) -> tuple:
+    """Both full hashes and, when the integrity fields were inconsistent, the issue list and every raw
+    integrity occurrence, as bounded `phase=P ids=i/n` events (never sliced)."""
+    groups = [(None, [f"hash={report.profile_hash or 'none'}",
+                      f"applied_hash={report.applied_profile_hash or 'none'}"])]
+    if report.integrity_issues:
+        groups.append(("integrity_issues=", list(report.integrity_issues)))
+        groups.append(("raw_integrity=", [f"{k}:{v}" for k, v in report.raw_integrity]))
+    return _ids_lines(phase, groups)
 
 
 def profile_ids_event_text(report: ProfileReport, *, phase: str) -> str:
-    """The armed and applied profile hashes in full (and, when the integrity fields were inconsistent, their
-    raw values), for a line that had no room for them."""
-    text = (f"phase={phase} hash={report.profile_hash or 'none'} "
-            f"applied_hash={report.applied_profile_hash or 'none'}")
-    if report.integrity_issues:
-        text += " " + _raw_integrity_text(report)
-    return text[:EVENT_LIMIT]
+    """All of `profile_ids_event_lines` joined (for display and tests; may exceed EVENT_LIMIT). The recorder
+    path writes the bounded events of `profile_event_lines` instead."""
+    return " ".join(profile_ids_event_lines(report, phase=phase))
 
 
 def profile_codes_event_text(report: ProfileReport) -> str | None:
