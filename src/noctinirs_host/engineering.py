@@ -15,6 +15,7 @@ import time
 from .calibration import Assumptions
 from .calibration_sweep import Sweep, SweepPlan, canonical, evidence
 from .control.engineering_fake import EngineeringFake
+from .control.pairing import ADDRESS, PORT, WindowsWifi, candidates, confirm_device
 from .control.profile import profile_attribution, profile_codes_event_text, profile_event_lines, profile_summary
 from .control.protocol import ST_SAFE_OFF, ST_STARTING, ST_STOPPED, ST_STOPPING, ST_STREAMING
 from .control.session import PROFILE_TIMEOUT_S, LoopbackTransport, SessionController
@@ -123,8 +124,15 @@ class EngineeringRun:
 
     def __init__(self, geometry: Geometry, host_sha: str | None = None, *,
                  controller_factory=SessionController, recorder_factory=Recorder,
-                 fake_options: dict | None = None, calibration_params=None, sweep_plan=None) -> None:
+                 fake_options: dict | None = None, calibration_params=None, sweep_plan=None,
+                 wifi=None, udp_factory=UDPTransport) -> None:
         self.geometry = geometry
+        self.wifi = wifi if wifi is not None else WindowsWifi()
+        self._udp_factory = udp_factory
+        self.access_points = ()
+        self._paired = None
+        self._reconnect_at = None
+        self._reconnect_tries = 0
         self.fake_options = {"profile_model": True, "require_profile": True, **(fake_options or {})}
         self.calibration_params = calibration_params or Assumptions()
         self.sweep_plan = sweep_plan or SweepPlan()
@@ -206,18 +214,52 @@ class EngineeringRun:
         if not result.ok:
             raise ValueError(f"{result.command}: {result.status} ({result.message})")
 
-    def connect(self, fake: bool, address: str, port: str) -> None:
+    def _require_disconnected(self):
+        if self.connected or self._closing is not None or self.recorder is not None:
+            raise ValueError("Disconnect and close the recorder before pairing.")
+        if self.controller and self.controller.start_uncertain:
+            raise ValueError("Resolve the pending START at the original endpoint first.")
+
+    def discover(self):
+        self._require_disconnected()
+        self.access_points = ()
+        self.access_points = tuple(candidates(self.wifi))
+        self._note(f"Found {len(self.access_points)} NoctiNIRS Wi-Fi access point(s)." if self.access_points else
+                   "No NoctiNIRS found. Check device power, range and Windows Location access.")
+
+    def pair(self, access_point, password=None):
+        self._require_disconnected()
+        if access_point not in self.access_points:
+            raise ValueError("Scan for NoctiNIRS and select an access point.")
+        self._paired = self._reconnect_at = None
+        self.wifi.associate(access_point, password)
+        # DHCP can finish after association. Confirm via INFO, using the same UDP link
+        # that the session will own. Never try an endpoint under a different BSSID.
+        for attempt in range(3):
+            try:
+                self.connect(False, ADDRESS, PORT, access_point=access_point)
+                return
+            except (OSError, ValueError):
+                if attempt == 2:
+                    raise
+                time.sleep(.5)
+
+    def connect(self, fake: bool, address: str, port: str, *, access_point=None) -> None:
         if self.controller and self.controller.start_uncertain:
             raise ValueError("Resolve the pending START at the original endpoint before connecting.")
         if self.connected or self._closing is not None or self.recorder is not None:
             raise ValueError("Finish disconnecting and closing the recorder before connecting.")
+        if access_point is not None and not self.wifi.associated(access_point):
+            raise ValueError("Windows is no longer joined to the selected device.")
+        if access_point is None:
+            self._paired = self._reconnect_at = None
         if fake:
             transport = LoopbackTransport(EngineeringFake(geometry=self.geometry, **self.fake_options))
             endpoint = "Local RAW fake (in-process loopback)"
         else:
             if not re.fullmatch(r"[0-9]{1,5}", port):
                 raise ValueError("Enter a UDP port from 1 to 65535.")
-            transport = UDPTransport(address, int(port))
+            transport = self._udp_factory(address, int(port))
             endpoint = f"UDP {transport.endpoint[0]}:{transport.endpoint[1]}"
         self.calibration = self.calibration_armed = None
         self.endpoint = endpoint
@@ -237,6 +279,15 @@ class EngineeringRun:
         self._deferred_profile = None
         self._result(ctl.connect())
         self.context = ctl.recording_snapshot()
+        if access_point is not None:
+            info = self.context.get("observed_info") or {}
+            if (not confirm_device(info.get("ascii", ""), ctl.info)
+                    or not self.wifi.associated(access_point)):
+                ctl.disconnect()
+                self.context = {}
+                raise ValueError("Wi-Fi joined, but the selected endpoint did not confirm NoctiNIRS identity.")
+            self._paired = access_point
+            self._reconnect_at = None
         self._profile_query("connect")
         self._note(f"Connected to {endpoint}. Configure ENGINEERING before starting.")
 
@@ -804,6 +855,7 @@ class EngineeringRun:
         self._preview_feed(raw, host_us, env.msg_sequence)
 
     def disconnect(self) -> None:
+        self._paired = self._reconnect_at = None
         if self._closing is not None:
             return
         self.sweep = self.calibration = self.calibration_armed = None
@@ -845,6 +897,27 @@ class EngineeringRun:
         self._end_preview("link lost")
         self.fail(message)
         self._close_link(message, ctl.recording_snapshot() if ctl else None)
+        if self._paired and not self._closing and not (ctl and ctl.start_uncertain):
+            self._reconnect_at = time.monotonic() + 2
+            self._reconnect_tries = 0
+
+    def _reconnect(self):
+        if (self._reconnect_at is None or time.monotonic() < self._reconnect_at
+                or self.recorder is not None or self._job is not None or self._closing is not None):
+            return
+        self._reconnect_at = None
+        try:
+            self.wifi.associate(self._paired)
+            self.connect(False, ADDRESS, PORT, access_point=self._paired)
+        except (ValueError, OSError) as exc:
+            self._reconnect_tries += 1
+            if self._reconnect_tries < 2:
+                self._reconnect_at = time.monotonic() + 3
+            else:
+                self.fail(f"Could not reconnect to the selected device. Scan and connect again. {exc}")
+        else:
+            self.error = ""
+            self._note("Device reconnected. Apply configuration and run a new calibration before Start.")
 
     def _poll_disk(self) -> None:
         if self._job is None or not self._job.done():
@@ -941,6 +1014,7 @@ class EngineeringRun:
         self._deferred_follow()
         self._poll_disk()
         self._launch_auto()
+        self._reconnect()
         if (self._auto_finalize and self.recorder_state in ("ARMED", "RECORDING") and self.stopped
                 and self.recording_used and self._job is None and self._closing is None):
             self._auto_finalize = False
@@ -1012,6 +1086,8 @@ class EngineeringRun:
         meta = self.recorder.metadata() if self.recorder else None
         return {
             "connected": connected, "endpoint": self.endpoint,
+            "access_points": self.access_points,
+            "reconnecting": self._reconnect_at is not None,
             "device_state": ctl.state_text if connected else "DISCONNECTED",
             "boot": ctl.boot_id if connected else None,
             "session": (ctl.session_id or None) if connected else None,

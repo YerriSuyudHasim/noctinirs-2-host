@@ -66,6 +66,8 @@ class SessionWorker(QtCore.QThread):
                     getattr(run, action)(*args)
                 except (ValueError, OSError) as exc:
                     run.fail(str(exc))
+                finally:
+                    args = ()
             run.tick()
             now = time.monotonic()
             if action or now >= next_update or run.finished:
@@ -301,21 +303,30 @@ class EngineeringWindow(QtWidgets.QMainWindow):
 
     def _device_step(self):
         page = self._page("Device · connection and ENGINEERING", self.setup_steps)
-        page.addWidget(_label("For a physical device, connect the PC to its Wi-Fi manually and enter "
-                              "the IPv4 endpoint supplied for the bench."))
+        page.addWidget(_label("Search for a NoctiNIRS nearby. Windows may lose internet while joined "
+                              "to the device Wi-Fi."))
         form = QtWidgets.QFormLayout()
         page.addLayout(form)
         self.source = QtWidgets.QComboBox()
-        self.source.addItems(["Local RAW fake (simulation)", "UDP device endpoint"])
+        self.source.addItems(["Local RAW fake (simulation)", "Advanced · manual UDP", "NoctiNIRS Wi-Fi"])
         self.source.currentIndexChanged.connect(self._render)
         self.address = QtWidgets.QLineEdit()
         self.port = QtWidgets.QLineEdit()
         form.addRow("Source", self.source)
+        self._endpoint_form = form
         form.addRow("Device IPv4 address", self.address)
         form.addRow("UDP port", self.port)
+        self.ap_list = QtWidgets.QComboBox()
+        self.ap_list.currentIndexChanged.connect(self._render)
+        form.addRow("Discovered devices", self.ap_list)
+        self._shown_access_points = ()
+        self.scan_button = self._button("Cari perangkat", lambda: self._submit("discover"))
+        self.new_key = QtWidgets.QCheckBox("Use a different Wi-Fi password")
+        page.addWidget(self.new_key)
         row = QtWidgets.QHBoxLayout()
         self.connect_button = self._button("Connect", self._connect, primary=True)
         self.disconnect_button = self._button("Disconnect", self._disconnect)
+        row.addWidget(self.scan_button)
         row.addWidget(self.connect_button)
         row.addWidget(self.disconnect_button)
         row.addStretch()
@@ -598,7 +609,20 @@ class EngineeringWindow(QtWidgets.QMainWindow):
                                     about_text(__version__, QtCore.qVersion(), PySide6.__version__))
 
     def _connect(self):
-        self._submit("connect", self.source.currentIndex() == 0, self.address.text(), self.port.text())
+        if self.source.currentIndex() == 2:
+            ap = self.ap_list.currentData()
+            if ap is None:
+                return
+            password = None
+            if not ap.saved or self.new_key.isChecked():
+                password, ok = QtWidgets.QInputDialog.getText(
+                    self, "NoctiNIRS Wi-Fi", "Device Wi-Fi password",
+                    QtWidgets.QLineEdit.EchoMode.Password)
+                if not ok:
+                    return
+            self._submit("pair", ap, password)
+        else:
+            self._submit("connect", self.source.currentIndex() == 0, self.address.text(), self.port.text())
 
     def _disconnect(self):
         if self.state.get("session") or self.state.get("recording_open"):
@@ -786,10 +810,27 @@ class EngineeringWindow(QtWidgets.QMainWindow):
         self.connection.set_text(device)
         self.device.set_text(device)
         self.source.setEnabled(not (connected or busy or recorder_open))
-        fields_enabled = self.source.currentIndex() == 1 and self.source.isEnabled()
-        self.address.setEnabled(fields_enabled)
-        self.port.setEnabled(fields_enabled)
-        self.connect_button.setEnabled(not (connected or uncertain or busy or recorder_open or disk))
+        manual = self.source.currentIndex() == 1
+        wifi = self.source.currentIndex() == 2
+        idle = not (connected or uncertain or busy or recorder_open or disk or s.get("reconnecting"))
+        for field, visible in ((self.address, manual), (self.port, manual), (self.ap_list, wifi)):
+            field.setVisible(visible)
+            self._endpoint_form.labelForField(field).setVisible(visible)
+            field.setEnabled(idle)
+        aps = s.get("access_points", ())
+        if aps != self._shown_access_points:
+            self._shown_access_points = aps
+            with QtCore.QSignalBlocker(self.ap_list):
+                self.ap_list.clear()
+                for ap in aps:
+                    self.ap_list.addItem(ap.label, ap)
+        ap = self.ap_list.currentData()
+        self.new_key.setVisible(bool(wifi and ap and ap.saved))
+        self.new_key.setEnabled(idle)
+        self.scan_button.setVisible(wifi)
+        self.scan_button.setEnabled(idle)
+        self.connect_button.setText("Hubungkan" if wifi else "Connect")
+        self.connect_button.setEnabled(idle and (not wifi or ap is not None))
         for button in (self.disconnect_button, self.panel_disconnect):
             button.setEnabled(connected and not busy)
         for check, safe in self._recovery_buttons:
