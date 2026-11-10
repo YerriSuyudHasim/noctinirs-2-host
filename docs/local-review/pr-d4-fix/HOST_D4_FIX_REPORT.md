@@ -7,7 +7,9 @@
 
 ## Commit
 
-Lihat bagian "Hash commit" di bawah (diisi setelah commit). Diff stat terhadap `de9f1b4` ada di akhir dokumen.
+Commit kode: `7834bb0` (di atas `de9f1b4`). Commit kedua hanya menambahkan hash ini ke laporan.
+
+Diff stat `de9f1b4..7834bb0`: 27 file, +2647 / −157. Sumber: engineering_fake, profile (baru), protocol, session, engineering (core), qss, tokens, engineering (UI), preview_panel, widgets; tes: test_profile, test_d4_fix, test_profile_ui (baru), test_design_ui, test_engineering (diubah); bukti: 9 PNG + measurements.json + evidence_d4_fix.py + laporan ini.
 
 ## Bagian A — D4-01..10
 
