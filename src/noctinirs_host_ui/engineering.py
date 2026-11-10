@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from pathlib import Path
 from queue import Empty, Queue
 import re
@@ -16,6 +17,7 @@ from noctinirs_host import __version__
 from noctinirs_host.engineering import EngineeringRun, UNKNOWN, default_recording_folder
 from noctinirs_host.geometry import load_geometry
 from noctinirs_host.preview import PREVIEW_LABEL
+from noctinirs_host.preview.filters import FilterConfig, design, timing
 from noctinirs_host.preview.params import PreviewConfig
 
 from .battery_text import format_battery
@@ -489,6 +491,9 @@ class EngineeringWindow(QtWidgets.QMainWindow):
         buttons.addWidget(self.reset_baseline_button)
         lay.addLayout(buttons)
 
+        lay, self.section_filter = block("Filter preview", expanded=False)
+        self._build_filter_settings(lay)
+
         lay, self.section_detail = block("Detail channel (klik baris)")
         self.detail = AutoText(min_lines=12)
         lay.addWidget(self.detail)
@@ -653,6 +658,58 @@ class EngineeringWindow(QtWidgets.QMainWindow):
         else:
             self._submit("start")
 
+    def _build_filter_settings(self, layout):
+        form = QtWidgets.QFormLayout()
+        layout.addLayout(form)
+        self.bp = QtWidgets.QCheckBox("Bandpass")
+        self.hp = QtWidgets.QCheckBox("Detrend · high-pass 0.01 Hz")
+        self.lp = QtWidgets.QCheckBox("Low-pass")
+        defaults = FilterConfig()
+        cutoffs = []
+        for label, value in (("Bandpass lower Hz", defaults.band_low), ("Bandpass upper Hz", defaults.band_high),
+                             ("Low-pass Hz", defaults.low_cutoff)):
+            spin = QtWidgets.QDoubleSpinBox()
+            spin.setDecimals(3)
+            spin.setRange(.001, 100)
+            spin.setSingleStep(.01)
+            spin.setValue(value)
+            cutoffs.append((label, spin))
+        self.bp_lo, self.bp_hi, self.lp_cutoff = [spin for _, spin in cutoffs]
+        form.addRow(self.bp)
+        for label, spin in cutoffs[:2]:
+            form.addRow(label, spin)
+        form.addRow(self.hp)
+        form.addRow(self.lp)
+        form.addRow(*cutoffs[-1])
+        grid = QtWidgets.QGridLayout()
+        layout.addLayout(grid)
+        self.filter_channels = {}
+        for i, name in enumerate(self.panel.order):
+            check = QtWidgets.QCheckBox(name)
+            grid.addWidget(check, i // 4, i % 4)
+            self.filter_channels[name] = check
+        layout.addWidget(self._button("Apply to all channels", self._apply_all_filters))
+        layout.addWidget(self._button("Apply filters", self._apply_filters))
+        self.filter_detail = AutoText(min_lines=2)
+        layout.addWidget(self.filter_detail)
+
+    def _apply_all_filters(self):
+        for checkbox in self.filter_channels.values():
+            checkbox.setChecked(True)
+        self._apply_filters()
+
+    def _apply_filters(self):
+        cfg = FilterConfig(self.bp.isChecked(), self.bp_lo.value(), self.bp_hi.value(),
+                           self.hp.isChecked(), self.lp.isChecked(), self.lp_cutoff.value(),
+                           tuple(name for name, box in self.filter_channels.items() if box.isChecked()))
+        try:
+            cfg.validate(self.state.get("fs") or 10)
+        except ValueError as exc:
+            self._form_error = str(exc)
+            self._render()
+            return
+        self._submit("set_preview_config", replace(self.preview_cfg, filters=cfg))
+
     def _apply_live(self):
         try:
             self.preview_cfg = self.live_form.apply_to(self.preview_cfg)
@@ -756,6 +813,18 @@ class EngineeringWindow(QtWidgets.QMainWindow):
             self._pending = ""
         self.panel.reset_for_epoch(state.get("preview_epoch"))
         self.panel.set_fs(state.get("fs"))
+        cfg = state.get("preview_config")
+        if cfg is not None:
+            if action == "set_preview_config" and not state.get("error"):
+                self.preview_cfg = cfg
+            self.panel.set_filter_config(cfg.filters)
+            fs = state.get("fs") or 10
+            sections = design(cfg.filters, fs)
+            warmup, delay, hz = timing(cfg.filters, fs, sections)
+            self.filter_detail.set_text(
+                (f"{cfg.filters.label} · {len(cfg.filters.channels)} channel(s) · OD and Hb only\n"
+                 f"Warm-up ≈ {warmup:.0f} s · delay ≈ {delay:.2f} s at {hz:.3g} Hz"
+                 if sections and cfg.filters.channels else "Filters off. Intensity always shows the original values."))
         self.panel.push(state.get("preview_new", ()))
         self._render()
 

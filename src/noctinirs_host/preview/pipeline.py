@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from ..geometry import Geometry
 from ..wire.optical import RawPacket
 from . import quality as Q
+from .filters import PreviewFilters
 from .baseline import MedianBaseline
 from .mbll import mbll_delta
 from .od import optical_density
@@ -52,6 +53,7 @@ class ChannelPoint:
     ssr_reason: str = ""
     sigma735: float = NAN
     sigma850: float = NAN
+    filter_warming: bool = False
 
     @property
     def has_hb(self) -> bool:
@@ -129,6 +131,7 @@ class PreviewPipeline:
     def _set_config(self, config: PreviewConfig, t_s: float, *, initial=False) -> None:
         config.validate()
         old = None if initial else self.config
+        self.filters = PreviewFilters(config.filters, self.fs)
         self.config = config
         self.dpf = resolve_dpf(config.dpf)
         if initial or (old.baseline_s, old.min_baseline_samples) != (
@@ -153,6 +156,7 @@ class PreviewPipeline:
         self.baseline_resets.append({"t_s": t_s, "reason": reason})
 
     def reset_baseline(self, reason: str = "operator reset") -> None:
+        self.filters.reset()
         self._reset_baselines(getattr(self, "_last_t", 0.0), reason)
         self._build_regressors()
 
@@ -233,6 +237,7 @@ class PreviewPipeline:
             out.extend(self._add_measurement(m))
         out.extend(self._close_cycle())
         self.pending = out
+        self.filters.reset()
         if self._t0_us is None or self._last_host_us is None:
             return None
         t = (self._last_host_us - self._t0_us) / 1e6 + 1.0 / self.fs
@@ -358,7 +363,9 @@ class PreviewPipeline:
                               optical_density(vals["850"], b[1].value), warns, sig["735"], sig["850"])
         points = {ch.name: self._finish(ch, stage) for ch in geo.channels}
         self._count_final(points)
-        return FrameResult(t, points, len(cycle) == 20)
+        if len(cycle) != 20 or any(m.partial or m.gap for m in cycle.values()):
+            self.filters.reset()
+        return FrameResult(t, self.filters.apply(points), len(cycle) == 20)
 
     def _count_final(self, points: dict) -> None:
         """Counts after SSR and MBLL, so every reason that hides or flags a channel is included."""

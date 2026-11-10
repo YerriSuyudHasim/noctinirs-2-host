@@ -301,6 +301,7 @@ class EngineeringRun:
             raise ValueError("Choose a rate advertised by the peer in INFO fs_allowed.")
         self.configured = False
         self.calibration = self.calibration_armed = None
+        self.preview_config.filters.validate(fs)
         self._result(ctl.set_mode("ENGINEERING"))
         self._result(ctl.set_fs(fs))
         info = ctl.refresh_info()
@@ -793,10 +794,15 @@ class EngineeringRun:
     # ---- PREVIEW (never affects RAW recording) ----------------------------
     def set_preview_config(self, config: PreviewConfig) -> None:
         config.validate()
-        self.preview_config = config
+        fs = self.controller.settings.fs_hz if self.connected else None
+        config.filters.validate(fs or 10)
+        old_filters = self.preview_config.filters
         if self.preview is not None:
             self.preview.configure(config)
+        self.preview_config = config
         if self.recorder is not None and self.recorder_state in ("ARMED", "RECORDING"):
+            if config.filters != old_filters:
+                self.recorder.event("preview_filter", canonical(config.filters.metadata()).decode("ascii"))
             self.recorder.event("preview_config", f"PREVIEW settings changed: ssr={config.ssr_mode} "
                                 f"dpf={config.dpf.mode} baseline_s={config.baseline_s} "
                                 "(full record in .preview.json)")

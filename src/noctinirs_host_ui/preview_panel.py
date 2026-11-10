@@ -17,6 +17,7 @@ import pyqtgraph as pg
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from noctinirs_host.preview import PREVIEW_LABEL
+from noctinirs_host.preview.filters import FilterConfig
 from noctinirs_host.preview.params import (DpfSetting, ExtinctionTable, PreviewConfig,
                                            SSR_METHODS, SSR_MODES, resolve_dpf)
 
@@ -630,6 +631,12 @@ class PreviewPanel(QtWidgets.QWidget):
             f"<span style='color:{t.marker_clamp}'><b>●</b></span> di luar skala · label 735/850 nominal")
 
     # ---- controls ------------------------------------------------------------------------------
+    def set_filter_config(self, config: FilterConfig) -> None:
+        if config != getattr(self, "filter_config", None):
+            self.filter_config = config
+            for name in self.rows:
+                self._update_status(name)
+
     def set_fs(self, fs: float | None) -> None:
         if fs:
             self.fs = float(fs)
@@ -647,6 +654,8 @@ class PreviewPanel(QtWidgets.QWidget):
         if hasattr(self, "rows"):
             self._paint_traces()
         self._reset_ranges()
+        for name in self.rows:
+            self._update_status(name)
 
     def _window_changed(self, *_):
         self.window_s = self.window_combo.currentData()
@@ -756,6 +765,13 @@ class PreviewPanel(QtWidgets.QWidget):
             text, color = "◆ tanpa koreksi SCR", t.marker_uncorrected
         else:
             text, color = "● OK", t.success
+        cfg = getattr(self, "filter_config", None)
+        if self.mode != "I" and cfg and cfg.label and name in cfg.channels:
+            warming = "*" if p.filter_warming else ""
+            text = f"{cfg.label}{warming} · {text}"
+            row.status.setToolTip("Butterworth preview filter. * = warming up.")
+        else:
+            row.status.setToolTip("")
         if row.status_key != (text, color):          # a style-sheet change is costly: only when it changed
             row.status_key = (text, color)
             row.status.setText(f"<span style='color:{color}'>{text}</span>")   # rich text: no style-sheet re-polish

@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
+from .filters import FilterConfig
 from .dpf import scholkmann_wolf_dpf
 from .quality import CONSTANTS
 
@@ -98,6 +99,7 @@ class PreviewConfig:
     ridge_lambda: float = 1e-3
     ssr_window_s: float = 30.0
     ssr_min_samples: int = 30
+    filters: FilterConfig = field(default_factory=FilterConfig)
 
     def validate(self) -> None:
         if self.ssr_mode not in SSR_MODES:
@@ -124,6 +126,7 @@ class PreviewConfig:
             "short_separation": {"mode": self.ssr_mode, "method": self.ssr_method,
                                  "ridge_lambda": self.ridge_lambda, "window_s": self.ssr_window_s,
                                  "min_samples": self.ssr_min_samples, "domain": "OD", "causal": True},
+            "display_filters": self.filters.metadata(),
             "quality": dict(CONSTANTS),
             "od": "ln(baseline/I), I = mean(ON_STABLE) - mean(OFF_STABLE) of the same slot",
             "output": "change relative to baseline (delta), micromolar",
