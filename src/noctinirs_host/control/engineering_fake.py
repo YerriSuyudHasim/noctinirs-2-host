@@ -50,7 +50,7 @@ class EngineeringFake(DeviceSimulator):
         opts = {k: kwargs.pop(k) for k in ("dead_slots", "saturate", "drop_cycles", "leak",
                                            "info_extra", "battery_mode", "battery",
                                            "battery_age_override_ms", "profile_model", "start_outcome",
-                                           "stop_evidence") if k in kwargs}
+                                           "stop_evidence", "require_profile") if k in kwargs}
         super().__init__(*args, **kwargs)
         self.geometry = kwargs.get('geometry')
         for k, v in opts.items():
@@ -66,6 +66,7 @@ class EngineeringFake(DeviceSimulator):
         self.profile_requests = 0
 
     profile_model = False
+    require_profile = False
     start_outcome = "ok"
     stop_evidence = "VALID_MATCH"
 
@@ -144,6 +145,8 @@ class EngineeringFake(DeviceSimulator):
             self._profile = None
             return self._reply(rid, op, STATUS_OK), True
         if op == OP_START and not args and self.state == ST_STOPPED:
+            if self.require_profile and not self._profile:
+                return self._reply(rid, op, STATUS_INVALID_STATE), True
             codes = self._armed_codes()
             source = "PROFILE" if self._profile else "DEFAULT"
             self._applied = dict(source=source, id=self._profile[0] if self._profile else 0,
@@ -221,7 +224,8 @@ class EngineeringFake(DeviceSimulator):
                 for ain in range(4):
                     ambient = 1800 + 90 * ain + self._rng.randint(-4, 4)
                     on = phase in (3, 4)
-                    v = ambient + (self._base(slot, ain) * self._modulation(slot, ain, t) if on else 0)
+                    scale = self._profile[2][slot] / 133 if self._profile else 1.0
+                    v = ambient + (scale * self._base(slot, ain) * self._modulation(slot, ain, t) if on else 0)
                     if (slot, ain) in self.saturate and phase == 4:
                         v = ADC_MAX
                     row.append(max(-ADC_MAX, min(ADC_MAX, int(round(v)))))

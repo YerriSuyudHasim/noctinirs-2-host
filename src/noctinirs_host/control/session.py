@@ -25,12 +25,12 @@ from ..wire.errors import WireError
 from ..wire.optical import LAYOUT_RAW, parse_raw
 from .protocol import (
     LED_CHANNELS, LED_MAX_MA, OP_CLEAR_FAULT, OP_GET_BATTERY, OP_GET_CONFIG, OP_GET_PROFILE, OP_GET_TIME, OP_HEARTBEAT, OP_INFO, OP_SAFE_OFF,
-    OP_SET_FS, OP_SET_LED_CURRENT, OP_SET_MODE, OP_START, OP_STATUS, OP_STOP, ST_STOPPED,
+    OP_SET_PROFILE, OP_CLEAR_PROFILE, OP_SET_FS, OP_SET_LED_CURRENT, OP_SET_MODE, OP_START, OP_STATUS, OP_STOP, ST_STOPPED,
     ST_STARTING, ST_STOPPING,
     ST_FAULTED, ST_SAFE_OFF, ST_STREAMING, STATUS_UNKNOWN_COMMAND, TIMED_OPS, Reply, args_host_time, args_set_fs, args_set_led_current,
     decode_reply, encode_request, state_name,
 )
-from .profile import ProfileReport
+from .profile import ProfileReport, args_set_profile
 
 from .battery import QUERY_TIMEOUT_S as BATTERY_TIMEOUT_S, BatteryMonitor
 
@@ -682,6 +682,16 @@ class SessionController:
         if res.ok and self.settings.current_ma:
             self.settings.current_ma[channel] = current_ma
         return res
+
+    def set_profile(self, ident, digest, codes) -> CommandResult:
+        if not self.connected or self.device_state != ST_STOPPED or self.session_id:
+            return self._reject("set_profile", "requires a connected STOPPED device")
+        return self._run("set_profile", OP_SET_PROFILE, args_set_profile(ident, digest, codes))
+
+    def clear_profile(self) -> CommandResult:
+        if not self.connected or self.device_state != ST_STOPPED or self.session_id:
+            return self._reject("clear_profile", "requires a connected STOPPED device")
+        return self._run("clear_profile", OP_CLEAR_PROFILE)
 
     def query_battery(self) -> CommandResult:
         """Read-only battery query (opcode 0x0033). Never changes session, state or lease.

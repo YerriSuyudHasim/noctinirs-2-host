@@ -31,6 +31,8 @@ class SlotMeasurement:
     on_n: int = 0
     off_n: int = 0
     saturated: list = field(default_factory=lambda: [False] * 4)
+    minimum: list = field(default_factory=lambda: [ADC_MAX] * 4)
+    maximum: list = field(default_factory=lambda: [ADC_MIN] * 4)
     partial: bool = False   # started at stream start or after a gap, or ended by a gap
     gap: bool = False       # a sample discontinuity happened inside this occurrence
 
@@ -115,6 +117,9 @@ class SlotAssembler:
                                             partial=self._fresh)
                 self._fresh = False
             cur = self._cur
+            for k, v in enumerate(s.ain):
+                cur.minimum[k] = min(cur.minimum[k], v)
+                cur.maximum[k] = max(cur.maximum[k], v)
             if s.phase_class == PH_ON_STABLE:
                 cur.on_n += 1
                 target, squares = cur.on_sum, cur.on_sq

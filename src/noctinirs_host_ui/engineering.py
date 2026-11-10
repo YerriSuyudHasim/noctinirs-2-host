@@ -357,6 +357,8 @@ class EngineeringWindow(QtWidgets.QMainWindow):
 
     def _session_step(self):
         page = self._page("Session · recording and readiness", self.setup_steps)
+        self._calibration_controls = []
+        self._add_calibration(page)
         self.record_check = QtWidgets.QCheckBox("Record RAW automatically when I press Start")
         self.record_check.setChecked(True)
         self.record_check.toggled.connect(self._render)
@@ -387,6 +389,18 @@ class EngineeringWindow(QtWidgets.QMainWindow):
         page.addWidget(_label("Readiness"))
         self.summary = AutoText(min_lines=4)
         page.addWidget(self.summary)
+
+    def _add_calibration(self, layout):
+        layout.addWidget(_label("Calibration · required for every Start"))
+        status = AutoText(min_lines=2)
+        layout.addWidget(status)
+        row = QtWidgets.QHBoxLayout()
+        start = self._button("Run calibration", lambda: self._submit("calibrate"))
+        cancel = self._button("Cancel sweep", lambda: self._submit("cancel_calibration"))
+        row.addWidget(start)
+        row.addWidget(cancel)
+        layout.addLayout(row)
+        self._calibration_controls.append((start, cancel, status))
 
     # ---- screen 3: Live ------------------------------------------------------
     def _live(self):
@@ -446,6 +460,7 @@ class EngineeringWindow(QtWidgets.QMainWindow):
         self.profile_line = AutoText(min_lines=3)        # LED calibration profile as the firmware reports it
         self.profile_line.setAccessibleName("LED calibration profile reported by the firmware")
         lay.addWidget(self.profile_line)
+        self._add_calibration(lay)
 
         self.panel = PreviewPanel(self.geometry, self.theme)
         self.panel.detail_changed.connect(self._show_detail)
@@ -888,9 +903,18 @@ class EngineeringWindow(QtWidgets.QMainWindow):
                                 f"Preview errors (never affect the RAW file): {s.get('preview_errors', 0)}")
         ready = bool(self._config_ready())
         busy = bool(self._pending or s.get("disk_busy") or s.get("closing") or self._closing_window)
-        self.start_button.setEnabled(ready and not busy and not s.get("recording_open")
+        calibrating = s.get("calibrating", False)
+        calibrated = s.get("calibration_ready", False)
+        for start, cancel, status in self._calibration_controls:
+            start.setEnabled(ready and not (busy or calibrating or s.get("recording_open")))
+            cancel.setVisible(calibrating)
+            cancel.setEnabled(calibrating and not self._pending)
+            flags = ", ".join(s.get("calibration_flags", ()))
+            status.set_text(s.get("calibration_status", "Run a fresh sweep before Start.")
+                            + (f"\nQuality warnings: {flags}" if flags else ""))
+        self.start_button.setEnabled(ready and calibrated and not busy and not s.get("recording_open")
                                      and not s.get("session") and not self._folder_problem())
-        self.stop_button.setEnabled(bool(s.get("can_stop") and not self._pending
+        self.stop_button.setEnabled(bool(s.get("can_stop") and not calibrating and not self._pending
                                          and not s.get("closing") and not self._closing_window))
         self.diag_button.setEnabled(bool(s.get("stopped") and not busy))
         self.reset_baseline_button.setEnabled(bool(s.get("preview_active")) and not self._pending)
