@@ -272,10 +272,6 @@ class PreviewPipeline:
         """Per-AIN assessment, then history update. Contralateral AINs are assessed too: they are
         the negative control for the leak decision."""
         res = [_Ain() for _ in range(4)]
-        if self.calibration_headroom is not None and (
-                max(m.maximum) >= self.calibration_headroom or min(m.minimum) <= -self.calibration_headroom):
-            self.headroom_exceeded = True
-            return [_Ain(invalid="CLIP_DETECTED") for _ in range(4)]
         for a in range(4):
             r, st = res[a], self._stats.setdefault((m.slot, a), Q.SlotAinStats())
             if m.on_n < 1 or m.off_n < 1:
@@ -283,9 +279,14 @@ class PreviewPipeline:
                 continue
             on, off = m.on_mean(a), m.off_mean(a)
             ambient = st.ambient_high(off)
+            over_headroom = self.calibration_headroom is not None and (
+                m.maximum[a] >= self.calibration_headroom or m.minimum[a] <= -self.calibration_headroom)
+            self.headroom_exceeded |= over_headroom
             if (m.saturated[a] or on >= Q.NEAR_RAIL_FRACTION * Q.ADC_RAIL
                     or (m.flat_on(a) and on >= Q.FLAT_TOP_MIN_FRACTION * Q.ADC_RAIL)):
                 r.invalid = "SATURATED"
+            elif over_headroom:
+                r.invalid = "CLIP_DETECTED"
             elif off >= Q.NEAR_RAIL_FRACTION * Q.ADC_RAIL or ambient:
                 r.invalid = "AMBIENT_HIGH"
             step = on - off
