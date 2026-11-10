@@ -339,9 +339,11 @@ def test_an_armed_profile_is_reported_applied_while_running_and_armed_afterwards
     run = rig.run
     run.connect(True, "", "")
     run.configure(5)
-    profile = seed_calibration(run, CODES)
+    sweep = seed_calibration(run, CODES)
     run.start_recorded(str(tmp_path), "")
     rig.go(lambda: run.profile_view and run.profile_view["phase"] == "running")
+    profile = run._recording_calibration
+    assert profile.profile_id != sweep.profile_id
     run.stop()
     rig.go(lambda: run.recorder_state == "FINALIZED", seconds=15)
     texts = rig.events("profile")

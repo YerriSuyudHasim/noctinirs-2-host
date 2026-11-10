@@ -1,6 +1,5 @@
 """Test-only post-sweep fixture for recording, recovery, and UI regressions."""
 
-from noctinirs_host.calibration_sweep import CalibrationProfile
 from noctinirs_host.control import protocol as p
 from noctinirs_host.control.profile import encode_profile_text
 from noctinirs_host.engineering import EngineeringRun
@@ -11,7 +10,7 @@ def seed_calibration(run, codes=(133,) * 20):
     ctl = run.controller
     context = ctl.recording_snapshot(info=ctl.refresh_info())
     report, _ = run._calibration_readback()
-    profile = CalibrationProfile.create(codes, dict(boot_id=ctl.boot_id,
+    profile = run._new_calibration_profile(codes, dict(boot_id=ctl.boot_id,
         configuration=context["config"], default_table=run._read_defaults(report), slots=[],
         fixture="synthetic post-sweep state"))
     run.calibration_armed = run._arm_calibration_profile(profile)

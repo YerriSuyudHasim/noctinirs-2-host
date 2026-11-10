@@ -1,4 +1,4 @@
-"""Stage 2 default-table wire codec (firmware contract S2-1.0)."""
+"""Stage 2 default-table wire codec (firmware contract S2-1.1)."""
 
 from dataclasses import dataclass
 import re
@@ -6,7 +6,7 @@ import re
 from .profile import args_set_profile, IREF_SLOTS
 
 SHORT_STATES = ("UNSET", "PROVISIONAL", "SET")
-SHORT_SLOTS = (0, 1, 10, 11)  # S2-1.0, geometry map 1; checked against host geometry at readback.
+SHORT_SLOTS = (0, 1, 10, 11)  # S2-1.1, geometry map 1; checked against host geometry at readback.
 
 
 @dataclass(frozen=True)

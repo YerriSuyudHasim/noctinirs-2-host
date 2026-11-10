@@ -1,7 +1,7 @@
 """LED IREF calibration profile: `get-profile` (0x0034) reply parser, and request/test encoders.
 
 Supports the Stage 1 FIX6 report (d11548065d0c24c6b46cb7672827d323d1f69d29)
-and the Stage 2 firmware contract S2-1.0.
+and the Stage 2 firmware contract S2-1.1.
 
 Pinned source (the host does not extend the protocol; changes are raised in `noctinirs-2`):
   firmware repo noctinirs-2, base 519a96a26ede6517595d4f8a87cd64ab6b7a6fa5 plus the local patch series
@@ -84,7 +84,7 @@ _HEX_ID = re.compile(r"0x[0-9A-Fa-f]{1,8}")
 
 _ENUM_KEYS = {"profile_state": STATES, "profile_source": SOURCES, "start_result": START_RESULTS,
               "stop_evidence": STOP_EVIDENCE, "stop_integrity": INTEGRITY,
-              "start_gate": ("OPEN", "NO_PROFILE", "PROFILE_CONSUMED"),
+              "start_gate": ("OPEN", "NO_PROFILE", "PROFILE_CONSUMED", "START_EXHAUSTED"),
               "session_short_status": ("NONE", "UNSET", "PROVISIONAL", "SET")}
 _CODE_KEYS = ("profile_code", "default_code", "requested_code", "applied_code", "applied_at_stop",
               "requested_ua", "applied_ua", "legacy_requested_ma")

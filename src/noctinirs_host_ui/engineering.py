@@ -1039,7 +1039,10 @@ class EngineeringWindow(QtWidgets.QMainWindow):
             cancel.setVisible(calibrating)
             cancel.setEnabled(calibrating and not self._pending)
             flags = ", ".join(s.get("calibration_flags", ()))
+            short = s.get("short_interim_code", 67)
             status.set_text(s.get("calibration_status", "Run a fresh sweep before Start.")
+                            + f"\nTemporary short fallback: code {short}, subject to headroom. "
+                            "The wizard only reads the device default table."
                             + (f"\nQuality warnings: {flags}" if flags else ""))
         self.start_button.setEnabled(ready and calibrated and not busy and not s.get("recording_open")
                                      and not s.get("session") and not self._folder_problem())

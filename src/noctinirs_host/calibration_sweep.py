@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from statistics import fmean, stdev
 
-from .calibration import Assumptions, Level, empirical_choice, level_exclusions
+from .calibration import Assumptions, LEGACY_DEFAULT, Level, empirical_choice, level_exclusions
 from .control.profile import IREF_SLOTS
 from .preview.slots import ADC_MAX, ADC_MIN, SlotAssembler
 
@@ -18,24 +18,29 @@ class SweepPlan:
     # Integer sampling grid, configurable. These are probe points, not defaults or
     # measurements of LED turn-on. Short slots get a denser grid at the low end.
     long_codes: tuple[int, ...] = (1, 8, 32, 67, 133, 177, 222)
-    short_codes: tuple[int, ...] = (1, 4, 8, 16, 32, 67, 133)
+    short_codes: tuple[int, ...] = (1, 4, 8, 16, 32, 67, 132)
     reference_index: int = 3
 
     def __post_init__(self):
         if not (len(self.long_codes) == len(self.short_codes) >= 3
                 and 0 <= self.reference_index < len(self.long_codes)
+                and all(type(code) is int and 1 <= code < LEGACY_DEFAULT for code in self.short_codes)
                 and all(all(type(code) is int and 1 <= code <= 222 for code in codes)
                         and tuple(sorted(set(codes))) == codes
                         for codes in (self.long_codes, self.short_codes))):
             raise ValueError("Invalid sweep grid.")
 
-    def visits(self, short_slots, seed):
+    def visits(self, short_slots, seed, short_interim_code=Assumptions.short_interim_code):
         vectors = [tuple(short if slot in short_slots else long for slot in range(IREF_SLOTS))
                    for long, short in zip(self.long_codes, self.short_codes)]
         reference = vectors[self.reference_index]
+        interim = []
+        if short_slots and short_interim_code not in self.short_codes:
+            interim.append(tuple(short_interim_code if slot in short_slots else code
+                                 for slot, code in enumerate(reference)))
         high = [vector for vector in vectors if max(vector) > 133]
         rng = random.Random(seed)
-        order = [*vectors, reference, *reversed(vectors), reference]
+        order = [*vectors, *interim, reference, *reversed(vectors), *interim, reference]
         for _ in range(3):
             rng.shuffle(high)
             order.extend(high)
@@ -63,8 +68,13 @@ class CalibrationProfile:
     document: dict
 
     @classmethod
-    def create(cls, codes, metadata):
+    def create(cls, codes, metadata, *, used_ids=None):
+        if used_ids is None:
+            used_ids = set()
         ident = secrets.randbelow(0xffffffff) + 1
+        while ident in used_ids:
+            ident = secrets.randbelow(0xffffffff) + 1
+        used_ids.add(ident)
         document = dict(metadata, schema="noctinirs.iref-profile/1", profile_id=ident, codes=list(codes))
         return cls(ident, hashlib.sha256(canonical(document)).hexdigest(), tuple(codes), document)
 
@@ -75,10 +85,10 @@ class CalibrationProfile:
                 self.profile_id, self.profile_hash, self.codes):
             return False
         if stopped:
-            return (report.state == "CONSUMED" and report.start_gate == "PROFILE_CONSUMED"
+            return (report.state == "CONSUMED" and report.start_gate in ("PROFILE_CONSUMED", "START_EXHAUSTED")
                     if report.start_gate is not None else report.state == "ARMED")
         return (report.state == "ARMED" if not applied else
-                report.state == "APPLIED" and report.start_gate in (None, "PROFILE_CONSUMED")
+                report.state == "APPLIED" and report.start_gate in (None, "PROFILE_CONSUMED", "START_EXHAUSTED")
                 and report.source == "PROFILE" and report.start_result == "OK"
                 and report.applied_valid is True and report.applied_read is True
                 and (report.applied_profile_id, report.applied_profile_hash, report.requested_code,
@@ -215,9 +225,9 @@ class Sweep:
         self.plan = run.sweep_plan
         self.targets = [tuple(i for i in range(4) if run.geometry.channel_for(slot, i))
                         for slot in range(IREF_SLOTS)]
-        short = {slot for slot, targets in enumerate(self.targets)
+        self.short_slots = {slot for slot, targets in enumerate(self.targets)
                  if any(run.geometry.channel_for(slot, i).kind == "short" for i in targets)}
-        self.reference, self.order = self.plan.visits(short, self.seed)
+        self.reference, self.order = self.plan.visits(self.short_slots, self.seed, self.params.short_interim_code)
         self.visits = []
         self.phase = "next"
         self.deadline = 0
@@ -243,10 +253,11 @@ class Sweep:
             if not run.stopped or context["config"] != self.config:
                 raise ValueError("Device settings changed during calibration.")
             codes = self.order[len(self.visits)]
-            profile = CalibrationProfile.create(codes, dict(purpose="temporary-sweep",
+            profile = run._new_calibration_profile(codes, dict(purpose="temporary-sweep",
                                                               visit=len(self.visits), seed=self.seed,
                                                               fs_hz=self.fs, boot_id=self.boot))
             report, _ = run._calibration_readback()
+            run._require_start_capacity(report)
             if run._read_defaults(report) != self.defaults:
                 raise ValueError("Default table changed during calibration.")
             run._arm_calibration_profile(profile)
@@ -300,7 +311,8 @@ class Sweep:
             if not targets:
                 raise ValueError(f"Slot {slot} has no target detectors in the geometry map.")
             levels = levels_for_slot(self.visits, slot, self.reference, targets, self.params)
-            choice = empirical_choice(levels, targets, self.defaults["codes"][slot], self.fs, self.params)
+            choice = empirical_choice(levels, targets, self.defaults["codes"][slot], self.fs, self.params,
+                                      short=slot in self.short_slots)
             if choice.code is None:
                 raise ValueError(f"Slot {slot} has no usable headroom evidence. Check the probe and run a new sweep.")
             choices.append(choice)
@@ -308,13 +320,16 @@ class Sweep:
                                 levels=[dict(asdict(level), exclusions=level_exclusions(level, self.params))
                                         for level in levels]))
         metadata = config_metadata(self.plan, self.params)
-        metadata.update(fs_hz=self.fs, boot_id=self.boot, configuration=self.config,
+        metadata.update(purpose="sweep-result", fs_hz=self.fs, boot_id=self.boot, configuration=self.config,
                         geometry_sha256=run.geometry.sha256, simulated=self.ctl.simulated,
                         firmware_info=self.device, host_sha=run.host_sha,
                         completed_utc=datetime.now(timezone.utc).isoformat(),
                         default_table=self.defaults, seed=self.seed, slots=summary,
+                        short_interim=dict(code=self.params.short_interim_code, slots=sorted(self.short_slots),
+                                           scope="host tier 3", status="assumed_pending_caliper",
+                                           firmware_table_written=False),
                         visits=[visit.summary() for visit in self.visits])
-        profile = CalibrationProfile.create([choice.code for choice in choices], metadata)
+        profile = run._new_calibration_profile([choice.code for choice in choices], metadata)
         armed = run._arm_calibration_profile(profile)
         if run._read_defaults(run.controller.profile) != self.defaults:
             raise ValueError("The reported default table changed during calibration.")

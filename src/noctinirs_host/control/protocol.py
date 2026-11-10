@@ -51,8 +51,8 @@ OP_GET_BATTERY = 0x0033  # no arguments; read-only; any session id; never refres
 OP_GET_PROFILE = 0x0034  # no arguments; read-only; ASCII key=value report; any peer, like get_config
 OP_SET_PROFILE = 0x0103  # 56 B: id u32 LE, hash[32], code[20]; STOPPED only; cached.
 OP_CLEAR_PROFILE = 0x0104  # no arguments; STOPPED only; cached
-OP_SET_DEFAULT_TABLE = 0x0105  # S2-1.0; 57 B, STOPPED, cached
-OP_GET_DEFAULT_TABLE = 0x0035  # S2-1.0; no arguments, read-only
+OP_SET_DEFAULT_TABLE = 0x0105  # S2-1.1; 57 B, STOPPED, cached
+OP_GET_DEFAULT_TABLE = 0x0035  # S2-1.1; no arguments, read-only
 
 OPCODE_NAMES = {
     OP_HEARTBEAT: "heartbeat", OP_INFO: "info", OP_STATUS: "status",

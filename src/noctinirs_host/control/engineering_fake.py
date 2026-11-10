@@ -40,7 +40,7 @@ class EngineeringFake(DeviceSimulator):
     "start_cancelled"; the three failures follow the START ACK, as on the device). ``stop_evidence`` is the
     evidence class reported after a host STOP. Without ``profile_model`` the fake behaves like firmware
     that does not know the commands. With profile_model and stage2_model enabled, the fake
-    implements the S2-1.0 single-use gate and in-memory default-table report.
+    implements the S2-1.1 single-use gate and in-memory default-table report.
     """
 
     dead_slots: frozenset = frozenset()
@@ -107,6 +107,8 @@ class EngineeringFake(DeviceSimulator):
                 f";applied_valid={int(bool(a.get('valid')))};start_result={a.get('start_result', 'NONE')}")
 
     def _gate(self):
+        if self._next_session > 0xffffffff:
+            return "START_EXHAUSTED"
         return ("NO_PROFILE" if not self._profile else "OPEN" if self._fresh_profile else "PROFILE_CONSUMED")
 
     def _profile_state(self) -> str:
@@ -213,7 +215,8 @@ class EngineeringFake(DeviceSimulator):
             for name, indices in (
                 ("CODE_ZERO", [i for i, code in enumerate(codes) if code == 0]),
                 ("CODE_ABOVE_DEFAULT", [i for i, code in enumerate(codes) if code > 133]),
-                ("UNSET_NOT_DEFAULT", [i for i, code in enumerate(codes) if status == "UNSET" and code != 133]),
+                ("LONG_NOT_DEFAULT", [i for i, code in enumerate(codes) if i not in SHORT_SLOTS and code != 133]),
+                ("UNSET_NOT_DEFAULT", [i for i in SHORT_SLOTS if status == "UNSET" and codes[i] != 133]),
                 ("SHORT_NOT_BELOW_DEFAULT", [i for i in SHORT_SLOTS if status != "UNSET" and codes[i] == 133]),
             ):
                 if indices:

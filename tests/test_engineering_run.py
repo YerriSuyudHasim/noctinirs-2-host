@@ -243,6 +243,7 @@ def test_lost_start_is_visible_and_finalizes_without_unknown_raw(setup, tmp_path
     poll(run, lambda: run.recorder_state == "FINALIZED")
     assert run.snapshot()["start_uncertain"] and not run.stopped
     assert "START outcome unresolved" in run.error and peer.requests[before:] == []
+    assert "run calibration again" in run.error and run.calibration is None
     assert list(RawReplay(tmp_path / "run.raw.bin")) == []
     meta = json.loads((tmp_path / "run.json").read_text(encoding="utf-8"))
     end = meta["raw"]["context_at_end"]

@@ -30,7 +30,7 @@ from .protocol import (
     ST_FAULTED, ST_SAFE_OFF, ST_STREAMING, STATUS_UNKNOWN_COMMAND, TIMED_OPS, Reply, args_host_time, args_set_fs, args_set_led_current,
     decode_reply, encode_request, state_name,
 )
-from .default_table import args_set_default_table
+from .default_table import SHORT_STATES, args_set_default_table
 from .profile import ProfileReport, args_set_profile
 
 from .battery import QUERY_TIMEOUT_S as BATTERY_TIMEOUT_S, BatteryMonitor
@@ -706,6 +706,15 @@ class SessionController:
         if self.info.get("profile_api") != "IREF2":
             return self._reject("set_default_table", "requires the Stage 2 IREF2 firmware contract")
         args = args_set_default_table(ident, digest, codes, status, short_slots)
+        current = self.query_default_table()
+        if not current.ok:
+            return current
+        reply = current.reply
+        if reply.default_table is None or reply.session_id or reply.state != ST_STOPPED:
+            return self._reject("set_default_table", "cannot verify the current default table while STOPPED")
+        old = SHORT_STATES.index(reply.default_table.short_status)
+        if SHORT_STATES.index(status) not in (old, old + 1):
+            return self._reject("set_default_table", "short status must advance UNSET to PROVISIONAL to SET")
         return self._run("set_default_table", OP_SET_DEFAULT_TABLE, args)
 
     def query_battery(self) -> CommandResult:

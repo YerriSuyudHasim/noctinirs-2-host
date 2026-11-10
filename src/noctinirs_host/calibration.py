@@ -21,6 +21,7 @@ class Assumptions:
     loss_fraction: float = 0.02
     min_occurrences: int = 30
     empirical_tie: float = 0.05
+    short_interim_code: int = 67
 
     def __post_init__(self):
         fractions = (self.adc_margin, self.downward_drift, self.loss_fraction, self.empirical_tie)
@@ -29,7 +30,8 @@ class Assumptions:
                 or not all(isfinite(x) and x >= 0 for x in nonnegative)
                 or not all(isfinite(x) and x > 0 for x in
                            (self.analysis_enbw_hz, self.band_snr, self.floor_divisor))
-                or type(self.min_occurrences) is not int or self.min_occurrences < 2):
+                or type(self.min_occurrences) is not int or self.min_occurrences < 2
+                or type(self.short_interim_code) is not int or not 1 <= self.short_interim_code < LEGACY_DEFAULT):
             raise ValueError("Invalid calibration assumptions.")
 
     @property
@@ -165,9 +167,10 @@ def level_exclusions(level, params, offsets=None):
     return tuple(dict.fromkeys(flags))
 
 
-def empirical_choice(levels, targets, default_code, fs, params, offsets=None, *, model_flags=()):
+def empirical_choice(levels, targets, default_code, fs, params, offsets=None, *, model_flags=(), short=False):
     """E4 tiers 2 and 3. F3 allows the measured step as a flagged proxy for x."""
-    safe = [level for level in levels if 1 <= level.code <= MAX_CODE and not level_exclusions(level, params, offsets)]
+    cap = LEGACY_DEFAULT - 1 if short else MAX_CODE
+    safe = [level for level in levels if 1 <= level.code <= cap and not level_exclusions(level, params, offsets)]
     flags = list(model_flags or ("MODEL_UNIDENTIFIED",))
     corrections = offsets if offsets is not None else (0,) * len(levels[0].mean) if levels else ()
     if offsets is None:
@@ -196,14 +199,17 @@ def empirical_choice(levels, targets, default_code, fs, params, offsets=None, *,
 
     # Even a default needs V evidence from the current sweep. Prefer measured
     # headroom to extrapolating an unidentified model outside measured levels.
-    if not safe:
-        return Choice(None, None, (*flags, "NO_HEADROOM_EVIDENCE"))
+    if short:
+        default_code = params.short_interim_code
+        flags.extend((f"SHORT_INTERIM_{default_code}", "ASSUMED_SHORT_DEFAULT"))
     flags.extend(("DEFAULT_TIER", "LOW_SIGNAL", "C_ON_UNVERIFIED"))
-    codes = {level.code for level in safe}
+    codes = {level.code for level in safe if not short or level.code <= default_code}
     if default_code in codes:
         return Choice(default_code, 3, tuple(flags))
     tested_default = next((level for level in levels if level.code == default_code), None)
     flags.append("DEFAULT_FAILS_V" if tested_default else "DEFAULT_UNVERIFIED")
+    if not codes:
+        return Choice(None, None, (*flags, "NO_HEADROOM_EVIDENCE"))
     code = max(codes)
     if code > LEGACY_DEFAULT:
         flags.append("HIGH_CURRENT_PROFILE")
