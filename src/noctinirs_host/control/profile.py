@@ -8,6 +8,8 @@ Pinned source (the host does not extend the protocol; changes are raised in `noc
     0001 sha256 b3f98fdd330950604e5b8148685ff65dff5342e1cefc2b18d82799d0e80a9c97
     0002 sha256 1c57ebe36676b5d7b8d5a9cd9e57824d258d5ab90b358d99d0411ecfc9954ef8
     0003 sha256 437e73fe9b6e7ea7eb4330ea09418ed088275f63a4c6f17282a324875955cc4c   (FIX1)
+    0004 sha256 c691ab5392982ea08de619e4d70e6196789748e0d30f03c31181f54ff122e585   (FIX2: stop_evidence
+         gains NOT_RUN and UNAVAILABLE; no key added or removed, worst case still 1404 of 1412 bytes)
   docs/adr/0004-host-protocol.md section 15 and docs/FW_CALIB_STAGE1_IREF_PROFILE.md, revision
   "local amendment (Stage 1 calibration FIX1) 2026-11-10". The series is not committed in the firmware
   repository yet, so there is no commit SHA: the patch hashes above identify the contract.
@@ -39,11 +41,13 @@ STATES = ("NONE", "ARMED", "APPLIED", "NOT_APPLIED")
 SOURCES = ("NONE", "DEFAULT", "PROFILE")
 START_RESULTS = ("NONE", "OK", "PROFILE_NOT_APPLIED", "START_FAILED", "START_CANCELLED")
 STOP_EVIDENCE = ("NONE", "VALID_MATCH", "VALID_MISMATCH", "TRANSPORT_ERR", "TIMEOUT", "PREEMPTED",
-                 "SKIPPED_EMERGENCY")
+                 "SKIPPED_EMERGENCY", "NOT_RUN", "UNAVAILABLE")
 INTEGRITY = ("OK", "BLOCKED", "UNVERIFIED")
 # The device documents exactly these evidence names; PREEMPTED is an internal capture result that FIX1 maps
 # to SKIPPED_EMERGENCY (or TIMEOUT) before reporting. It is tolerated, not expected.
-DOCUMENTED_EVIDENCE = ("NONE", "VALID_MATCH", "VALID_MISMATCH", "TRANSPORT_ERR", "TIMEOUT", "SKIPPED_EMERGENCY")
+# FIX2 (patch 0004) adds NOT_RUN (normal STOP whose capture never ran) and UNAVAILABLE; both are UNVERIFIED.
+DOCUMENTED_EVIDENCE = ("NONE", "VALID_MATCH", "VALID_MISMATCH", "TRANSPORT_ERR", "TIMEOUT", "SKIPPED_EMERGENCY",
+                       "NOT_RUN", "UNAVAILABLE")
 # stop_integrity as the firmware derives it from the evidence (nn2_led_stop_integrity_name)
 INTEGRITY_OF = {"VALID_MATCH": "OK", "VALID_MISMATCH": "BLOCKED", "TRANSPORT_ERR": "BLOCKED"}
 

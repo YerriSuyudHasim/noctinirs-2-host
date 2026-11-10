@@ -28,6 +28,7 @@ CODES = [133] * 20
 EVIDENCE_CASES = [
     ("NONE", "UNVERIFIED"), ("VALID_MATCH", "OK"), ("VALID_MISMATCH", "BLOCKED"),
     ("TRANSPORT_ERR", "BLOCKED"), ("TIMEOUT", "UNVERIFIED"), ("SKIPPED_EMERGENCY", "UNVERIFIED"),
+    ("NOT_RUN", "UNVERIFIED"), ("UNAVAILABLE", "UNVERIFIED"),          # FIX2 (patch 0004)
 ]
 
 
@@ -380,7 +381,8 @@ def test_a_status_reply_after_a_refused_start_is_not_dropped_as_a_wrong_session(
 
 
 @pytest.mark.parametrize("evidence,integrity", [("VALID_MISMATCH", "BLOCKED"), ("TRANSPORT_ERR", "BLOCKED"),
-                                                ("TIMEOUT", "UNVERIFIED")])
+                                                ("TIMEOUT", "UNVERIFIED"), ("NOT_RUN", "UNVERIFIED"),
+                                                ("UNAVAILABLE", "UNVERIFIED")])
 def test_a_blocked_or_unverified_stop_is_flagged_in_the_sidecar(tmp_path, evidence, integrity):
     rig = start_recorded(tmp_path, stop_evidence=evidence)
     run = rig.run
