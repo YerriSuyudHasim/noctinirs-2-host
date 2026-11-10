@@ -13,6 +13,7 @@ import sys
 import time
 
 from .control.engineering_fake import EngineeringFake
+from .control.profile import profile_codes_event_text, profile_event_text, profile_summary
 from .control.protocol import ST_SAFE_OFF, ST_STARTING, ST_STOPPED, ST_STOPPING, ST_STREAMING
 from .control.session import LoopbackTransport, SessionController
 from .control.udp import UDPTransport
@@ -151,6 +152,13 @@ class EngineeringRun:
         self._end_context: dict | None = None
         self._exit_requested = False
         self.finished = False
+        # LED calibration profile (firmware get-profile). Read-only: the host reads and records what the
+        # device reports; it never arms, clears or applies a profile.
+        self.profile_view: dict | None = None
+        self._session_id: int | None = None
+        self._await_running = False
+        self._running_seen = False
+        self._await_end = False
 
     @property
     def connected(self) -> bool:
@@ -200,8 +208,12 @@ class EngineeringRun:
         ctl.listeners.append(lambda event: self._event(event.text))
         ctl.raw_capture_sink = self._capture
         ctl.battery_enabled = True  # read-only query; never blocks or fails the connection
+        ctl.profile_enabled = True  # read-only query; "not available" on firmware without get-profile
+        self.profile_view = None
+        self._await_running = self._await_end = False
         self._result(ctl.connect())
         self.context = ctl.recording_snapshot()
+        self._profile_query("connect")
         self._note(f"Connected to {endpoint}. Configure ENGINEERING before starting.")
 
     def configure(self, fs: int | None) -> None:
@@ -238,7 +250,7 @@ class EngineeringRun:
         if not self.stopped or not self.configured or self.controller.settings.mode != "ENGINEERING":
             raise ValueError("Connect and apply ENGINEERING while STOPPED.")
 
-    def _observe(self, *, verify_config: bool = False) -> dict:
+    def _observe(self, *, verify_config: bool = False, profile_phase: str | None = "diagnostics") -> dict:
         ctl = self.controller
         if not self.connected:
             return ctl.recording_snapshot()
@@ -246,6 +258,11 @@ class EngineeringRun:
         info = ctl.refresh_info()
         config = ctl.refresh_config() if ctl.connected and verify_config else None
         status = ctl.refresh_status() if ctl.connected else None
+        if profile_phase == "ended" and not self._await_end:
+            profile_phase = None                       # this session's end was already read and recorded
+        if profile_phase and ctl.connected:
+            if self._profile_query(profile_phase) and profile_phase == "ended":
+                self._await_end = False
         self.context = ctl.recording_snapshot(info=info, status=status)
         if info.ok and (info.reply.info.get("mode") != "ENGINEERING"
                         or info.reply.info.get("frames") != "RAW_ENGINEERING"):
@@ -274,7 +291,7 @@ class EngineeringRun:
         if self._job is not None or self.recorder is not None or target != self.checked_target:
             raise ValueError("Check an unused recording destination before arming.")
         ctl = self.controller
-        context = self._observe(verify_config=True)
+        context = self._observe(verify_config=True, profile_phase="armed")
         self._require_ready()
         if context["observed_info"]["source"] != "INFO" or context["firmware_status"] is None:
             raise ValueError("Fresh INFO and STATUS are required to arm RAW recording.")
@@ -299,7 +316,7 @@ class EngineeringRun:
         if self._job is not None or (self.recorder is not None and (
                 self.recorder_state != "ARMED" or self.recording_used)):
             raise ValueError("Wait for the recorder or finalize the previous recording.")
-        context = self._observe(verify_config=True)
+        context = self._observe(verify_config=True, profile_phase="pre_start")
         self._require_ready()
         if self.recorder is not None and self._armed_config != context["config"]:
             raise ValueError("Settings changed since arming. Finalize and arm a new recording.")
@@ -325,6 +342,9 @@ class EngineeringRun:
             return
         if result.ok:
             self.preview_active = True
+            self._session_id = self.controller.session_id or None
+            self._await_running = self._await_end = True      # read the profile report when it is known
+            self._running_seen = False
         if result.ok and self.recorder is not None:
             self.recording_used = True
             self.recorder_state = "RECORDING"
@@ -392,6 +412,8 @@ class EngineeringRun:
             raise ValueError(f"SAFE_OFF not confirmed. Device reported {result.reply.state_text}.")
         self._stop_deadline = None
         self._note("Device reported SAFE_OFF. Physical LED state has not been measured.")
+        if self._await_end and self._profile_query("ended"):
+            self._await_end = False
         self._finalize(ctl.recording_snapshot())
 
     def stop(self) -> None:
@@ -415,7 +437,50 @@ class EngineeringRun:
     def finalize(self) -> None:
         if not self.stopped or self.recorder_state not in ("ARMED", "RECORDING"):
             raise ValueError("Wait for STOPPED before finalizing the recording.")
-        self._finalize(self._observe())
+        self._finalize(self._observe(profile_phase="ended"))
+
+    # ---- LED calibration profile report (read-only) ------------------------------------------------
+    def _profile_query(self, phase: str) -> bool:
+        """Read get-profile once and remember it for the status area; when a recorder is open, write what the
+        device reported (or that it could not be read) as sidecar events. False = not allowed right now
+        (the caller may try again later). A missing, old or odd reply never fails the session."""
+        ctl = self.controller
+        if ctl is None or not ctl.profile_enabled or not self.connected:
+            return False
+        result = ctl.query_profile()
+        if result.status == "LOCAL_REJECT":
+            return False
+        report = ctl.profile if (result.ok or result.status == "UNKNOWN_COMMAND") else None
+        failure = "" if report is not None else f"get-profile {result.status}: {result.message}"
+        self.profile_view = {"phase": phase, "report": report, "failure": failure,
+                             "boot_id": ctl.boot_id, "session_id": self._session_id}
+        self._event(f"LED profile ({phase}): " + (profile_summary(report).splitlines()[0] if report else failure))
+        if self.recorder is not None and self.recorder_state in ("ARMED", "RECORDING"):
+            if report is None:
+                self.recorder.event("profile", f"phase={phase} not read: {failure}"[:500])
+            else:
+                epoch = self.latest_raw.get("epoch")
+                self.recorder.event("profile", profile_event_text(
+                    report, phase=phase, boot_id=ctl.boot_id, session_id=self._session_id, plan_epoch=epoch))
+                codes = profile_codes_event_text(report)
+                if codes:
+                    self.recorder.event("profile_codes", codes)
+        return True
+
+    def _profile_follow(self) -> None:
+        """Read the report when the owned session reaches STREAMING and again when it has ended (normal STOP,
+        refused or failed START, fault, lease loss), before any recorder finalization."""
+        ctl = self.controller
+        if self._await_running and ctl.session_id and ctl.device_state == ST_STREAMING:
+            if self._running_seen:
+                if self._profile_query("running"):
+                    self._await_running = False
+            else:
+                self._running_seen = True       # the first owner heartbeat goes out before this read
+        if (self._await_end and not ctl.session_id
+                and ctl.device_state not in (ST_STARTING, ST_STREAMING, ST_STOPPING, None)):
+            if self._profile_query("ended"):
+                self._await_end = self._await_running = False
 
     def _finalize(self, context: dict | None) -> None:
         if self.recorder is None or self._job is not None:
@@ -596,6 +661,8 @@ class EngineeringRun:
         if self.connected:
             timeouts, session = ctl.counters["timeouts"], ctl.session_id
             ctl.tick()
+            if ctl.connected and ctl.counters["timeouts"] == timeouts:
+                self._profile_follow()
             if not ctl.connected or ctl.counters["timeouts"] != timeouts:
                 reason = "Device link lost or rebooted" if not ctl.connected else "Control poll timed out"
                 self._lose_link(f"{reason}. Device STOP is unconfirmed. Reconnect explicitly.")
@@ -660,6 +727,13 @@ class EngineeringRun:
         return {**ctl.battery.snapshot(ctl._clock()), "connected": True,
                 "streaming": ctl.device_state in (ST_STARTING, ST_STREAMING, ST_STOPPING)}
 
+    def _profile_state_view(self) -> dict:
+        view = self.profile_view
+        if view is None:
+            return {"summary": profile_summary(None), "report": None, "phase": None}
+        return {"summary": profile_summary(view["report"], failure=view["failure"]), "report": view["report"],
+                "phase": view["phase"], "integrity_blocked": bool(view["report"] and view["report"].integrity_blocked)}
+
     def _drain_preview(self) -> list:
         out, self._preview_out = self._preview_out, []
         return out
@@ -694,6 +768,7 @@ class EngineeringRun:
             "notice": self.notice, "error": self.error, "cleanup": self.cleanup,
             "log": tuple(self.log),
             "battery": self._battery_view(),
+            "profile": self._profile_state_view(),
             "preview_new": self._drain_preview(), "preview_errors": self.preview_errors,
             "preview_loss": self.preview.loss_stats() if self.preview is not None else {},
             "preview_active": self.preview_active, "preview_epoch": self.preview_epoch,

@@ -51,6 +51,37 @@ class AutoText(QtWidgets.QTextEdit):
         return int(self.document().size().height()) <= self.height()
 
 
+class WrapLabel(QtWidgets.QLabel):
+    """A word-wrapped label that sizes its own height to the width the layout gives it, so its complete
+    text is always visible (a plain wrapped label inside a horizontal layout is clipped instead)."""
+
+    def __init__(self, text: str = "", parent=None) -> None:
+        super().__init__(text, parent)
+        self.setWordWrap(True)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
+
+        self._fitting = False
+
+    def _fit(self) -> None:
+        if self._fitting:                    # setFixedHeight re-enters the layout: never recurse
+            return
+        self._fitting = True
+        try:
+            h = self.heightForWidth(max(self.width(), 1))
+            if h > 0 and self.minimumHeight() != h:
+                self.setFixedHeight(h)
+        finally:
+            self._fitting = False
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt name)
+        super().resizeEvent(event)
+        self._fit()
+
+    def setText(self, text: str) -> None:  # noqa: N802 (Qt name)
+        super().setText(text)
+        self._fit()
+
+
 class ElidedLabel(QtWidgets.QLabel):
     """One line of text, elided with an ellipsis when it does not fit; the full text is the tooltip."""
 
@@ -117,6 +148,7 @@ class StatusChip(QtWidgets.QLabel):
         self._theme = theme
         self._tone = "neutral"
         self._bg = QtGui.QColor()
+        self._target_bg = QtGui.QColor()
         self._border = QtGui.QColor()
         self._anim: QtCore.QVariantAnimation | None = None
         self.setContentsMargins(12, 5, 12, 5)
@@ -125,6 +157,7 @@ class StatusChip(QtWidgets.QLabel):
         self._apply(animate=False)
         if theme is not None:
             theme.changed.connect(lambda _t: self._apply(animate=False))
+            theme.motion_changed.connect(self._motion_changed)
 
     @property
     def tone(self) -> str:
@@ -156,22 +189,29 @@ class StatusChip(QtWidgets.QLabel):
         bg, fg, border = (QtGui.QColor(c) for c in self._colors())
         self.setStyleSheet(f"QLabel#statuschip {{ color: {fg.name()}; background: transparent; border: 0; }}")
         self._border = border
+        self._target_bg = bg
         ms = self._theme.ms(150) if self._theme is not None else 0
         if self._anim is not None:
             self._anim.stop()
-            self._anim = None
         if not animate or ms == 0 or not self.isVisible() or not self._bg.isValid():
             self._bg = bg
             self.update()
             return
-        anim = QtCore.QVariantAnimation(self)
-        anim.setStartValue(self._bg)
-        anim.setEndValue(bg)
-        anim.setDuration(ms)
-        anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
-        anim.valueChanged.connect(self._step)
-        anim.start()
-        self._anim = anim
+        if self._anim is None:          # one animation object for the life of the chip (no per-change garbage)
+            self._anim = QtCore.QVariantAnimation(self)
+            self._anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+            self._anim.valueChanged.connect(self._step)
+        self._anim.setStartValue(self._bg)
+        self._anim.setEndValue(bg)
+        self._anim.setDuration(ms)
+        self._anim.start()
+
+    def _motion_changed(self, reduced: bool) -> None:
+        """Reduce Motion takes effect at once: an in-flight colour change jumps to its end colour."""
+        if reduced and self._anim is not None:
+            self._anim.stop()
+            self._bg = QtGui.QColor(self._target_bg)
+            self.update()
 
     def _step(self, value) -> None:
         self._bg = QtGui.QColor(value)
@@ -197,6 +237,7 @@ class Section(QtWidgets.QWidget):
         self.content = content
         self._theme = theme
         self._anim: QtCore.QPropertyAnimation | None = None
+        self._end_visible = expanded
         self.button = QtWidgets.QToolButton()
         self.button.setText(title)
         self.button.setCheckable(True)
@@ -212,6 +253,8 @@ class Section(QtWidgets.QWidget):
         lay.addWidget(content)
         self._set_arrow(expanded)
         content.setVisible(expanded)
+        if theme is not None:
+            theme.motion_changed.connect(self._motion_changed)
 
     @property
     def animating(self) -> bool:
@@ -224,11 +267,10 @@ class Section(QtWidgets.QWidget):
         self._set_arrow(on)
         if self._anim is not None:
             self._anim.stop()
-            self._anim = None
+        self._end_visible = on
         ms = self._theme.ms(200) if self._theme is not None else 0
         if ms == 0 or not self.isVisible():
-            self.content.setMaximumHeight(16777215)
-            self.content.setVisible(on)
+            self._settle()
             return
         start = self.content.height() if self.content.isVisible() else 0
         if on:
@@ -237,19 +279,23 @@ class Section(QtWidgets.QWidget):
             end = max(self.content.sizeHint().height(), 1)
         else:
             end = 0
-        anim = QtCore.QPropertyAnimation(self.content, b"maximumHeight", self)
-        anim.setStartValue(start)
-        anim.setEndValue(end)
-        anim.setDuration(ms)
-        anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+        if self._anim is None:          # one animation object per section, reused by every fold
+            self._anim = QtCore.QPropertyAnimation(self.content, b"maximumHeight", self)
+            self._anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+            self._anim.finished.connect(self._settle)
+        self._anim.setStartValue(start)
+        self._anim.setEndValue(end)
+        self._anim.setDuration(ms)
+        self._anim.start()
 
-        def done():
-            self.content.setMaximumHeight(16777215)
-            self.content.setVisible(on)
+    def _settle(self) -> None:
+        self.content.setMaximumHeight(16777215)
+        self.content.setVisible(self._end_visible)
 
-        anim.finished.connect(done)
-        anim.start()
-        self._anim = anim
+    def _motion_changed(self, reduced: bool) -> None:
+        if reduced and self.animating:
+            self._anim.stop()
+            self._settle()
 
     @property
     def expanded(self) -> bool:
@@ -263,10 +309,13 @@ class SmoothScrollArea(QtWidgets.QScrollArea):
         super().__init__(parent)
         self._theme = theme
         self._target = 0
+        self.stops = None                    # optional callable -> scroll positions the wheel snaps between
         self._anim: QtCore.QPropertyAnimation | None = None
         self.setWidgetResizable(True)
         self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.verticalScrollBar().setSingleStep(48)
+        if theme is not None:
+            theme.motion_changed.connect(self._motion_changed)
 
     def scroll_to(self, value: int) -> None:
         bar = self.verticalScrollBar()
@@ -278,13 +327,18 @@ class SmoothScrollArea(QtWidgets.QScrollArea):
         if ms == 0 or not self.isVisible():
             bar.setValue(value)
             return
-        anim = QtCore.QPropertyAnimation(bar, b"value", self)
-        anim.setStartValue(bar.value())
-        anim.setEndValue(value)
-        anim.setDuration(ms)
-        anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
-        anim.start()
-        self._anim = anim
+        if self._anim is None:          # one animation object, retargeted for every scroll
+            self._anim = QtCore.QPropertyAnimation(bar, b"value", self)
+            self._anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+        self._anim.setStartValue(bar.value())
+        self._anim.setEndValue(value)
+        self._anim.setDuration(ms)
+        self._anim.start()
+
+    def _motion_changed(self, reduced: bool) -> None:
+        if reduced and self._anim is not None and self._anim.state() == QtCore.QAbstractAnimation.State.Running:
+            self._anim.stop()
+            self.verticalScrollBar().setValue(self._target)
 
     def wheelEvent(self, event) -> None:
         bar = self.verticalScrollBar()
@@ -294,7 +348,19 @@ class SmoothScrollArea(QtWidgets.QScrollArea):
             return
         running = self._anim is not None and self._anim.state() == QtCore.QAbstractAnimation.State.Running
         base = self._target if running else bar.value()
-        self.scroll_to(base - int(delta / 120 * 3 * bar.singleStep()))
+        if self.stops is not None:           # row-aligned: one wheel notch moves to the next stop
+            target = base
+            for _ in range(max(1, round(abs(delta) / 120))):
+                stops = sorted(self.stops())
+                if delta < 0:
+                    later = [v for v in stops if v > target + 1]
+                    target = later[0] if later else target
+                else:
+                    earlier = [v for v in stops if v < target - 1]
+                    target = earlier[-1] if earlier else target
+            self.scroll_to(target)
+        else:
+            self.scroll_to(base - int(delta / 120 * 3 * bar.singleStep()))
         event.accept()
 
 
@@ -308,6 +374,8 @@ class FadeStack(QtWidgets.QStackedWidget):
         self._anim: QtCore.QPropertyAnimation | None = None
         self._target: QtWidgets.QWidget | None = None
         self.transitions_started = 0
+        if theme is not None:
+            theme.motion_changed.connect(self._motion_changed)
 
     @property
     def animating(self) -> bool:
@@ -325,20 +393,27 @@ class FadeStack(QtWidgets.QStackedWidget):
         effect = QtWidgets.QGraphicsOpacityEffect(target)
         effect.setOpacity(0.0)
         target.setGraphicsEffect(effect)
-        anim = QtCore.QPropertyAnimation(effect, b"opacity", self)
-        anim.setStartValue(0.0)
-        anim.setEndValue(1.0)
-        anim.setDuration(ms)
-        anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
-        anim.finished.connect(self._finish)
-        anim.start()
-        self._anim, self._target = anim, target
+        if self._anim is None:          # one animation object for the stack; only its target effect changes
+            self._anim = QtCore.QPropertyAnimation(self)
+            self._anim.setPropertyName(b"opacity")
+            self._anim.setStartValue(0.0)
+            self._anim.setEndValue(1.0)
+            self._anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+            self._anim.finished.connect(self._finish)
+        self._anim.setTargetObject(effect)
+        self._anim.setDuration(ms)
+        self._target = target
+        self._anim.start()
         self.transitions_started += 1
+
+    def _motion_changed(self, reduced: bool) -> None:
+        if reduced:
+            self._finish()
 
     def _finish(self) -> None:
         if self._anim is not None:
             self._anim.stop()
-            self._anim = None
+            self._anim.setTargetObject(None)
         if self._target is not None:
             try:
                 self._target.setGraphicsEffect(None)

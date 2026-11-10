@@ -61,7 +61,7 @@ LIGHT = Tokens(
     accent_text="#FFFFFF", success="#17703F", success_bg="#E3F4EA", warning="#8A5A00",
     warning_bg="#FFF3CF", danger="#B3261E", danger_bg="#FBE9E7", plot_background="#FFFFFF",
     plot_grid="#DCE6F0", plot_axis="#46607A", hbo="#D55E00", hbr="#0072B2", od_a="#B83A0B",
-    od_b="#1D4ED8", marker_warning="#E69F00", marker_uncorrected="#7B4FB3", marker_clamp="#C62828",
+    od_b="#1D4ED8", marker_warning="#9C5F00", marker_uncorrected="#7B4FB3", marker_clamp="#C62828",
 )
 DARK = Tokens(
     name="dark", background="#0E1624", surface="#162235", surface_raised="#1D2C44", border="#2B3C58",

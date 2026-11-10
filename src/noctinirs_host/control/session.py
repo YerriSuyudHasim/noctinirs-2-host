@@ -24,15 +24,17 @@ from ..wire.envelope import MSG_FRAME, parse_envelope
 from ..wire.errors import WireError
 from ..wire.optical import LAYOUT_RAW, parse_raw
 from .protocol import (
-    LED_CHANNELS, LED_MAX_MA, OP_CLEAR_FAULT, OP_GET_BATTERY, OP_GET_CONFIG, OP_GET_TIME, OP_HEARTBEAT, OP_INFO, OP_SAFE_OFF,
+    LED_CHANNELS, LED_MAX_MA, OP_CLEAR_FAULT, OP_GET_BATTERY, OP_GET_CONFIG, OP_GET_PROFILE, OP_GET_TIME, OP_HEARTBEAT, OP_INFO, OP_SAFE_OFF,
     OP_SET_FS, OP_SET_LED_CURRENT, OP_SET_MODE, OP_START, OP_STATUS, OP_STOP, ST_STOPPED,
     ST_STARTING, ST_STOPPING,
     ST_FAULTED, ST_SAFE_OFF, ST_STREAMING, STATUS_UNKNOWN_COMMAND, TIMED_OPS, Reply, args_host_time, args_set_fs, args_set_led_current,
     decode_reply, encode_request, state_name,
 )
+from .profile import ProfileReport
 
 from .battery import QUERY_TIMEOUT_S as BATTERY_TIMEOUT_S, BatteryMonitor
 
+PROFILE_TIMEOUT_S = 0.4  # one read-only get-profile attempt (a reply is at most ~1.4 kB); no retries
 HEARTBEAT_PERIOD_S = 0.5  # local implementation record
 STATUS_PERIOD_S = 2.0  # host-chosen: keeps the displayed state fresh while not streaming
 TRANSITION_POLL_S = 0.05  # nn2ctl stop confirmation poll cadence
@@ -176,6 +178,11 @@ class SessionController:
         self.battery = BatteryMonitor()
         self.battery_counters = dict(queries=0, timeouts=0, unsupported=0, errors=0)
         self.battery_log: list[str] = []
+        # LED calibration profile report (get-profile). Read-only and opt-in like the battery query; the
+        # host never sends set-profile / clear-profile by itself.
+        self.profile_enabled = False
+        self.profile: ProfileReport | None = None
+        self.profile_counters = dict(queries=0, timeouts=0, unsupported=0, errors=0)
 
     # --- bookkeeping ----------------------------------------------------
     def _log(self, kind: str, text: str) -> None:
@@ -306,9 +313,15 @@ class SessionController:
         # ID: observe the state, never acquire that ID.
         # get_battery carries the current session id of the device, which may belong to another
         # endpoint. It is data about the device, never a session to adopt or reject.
+        # get_profile likewise reports the device's current session, which may be another endpoint's.
+        # A START that the device ends after its ACK (FIX1: PROFILE_NOT_APPLIED, START_FAILED, START_CANCELLED)
+        # leaves the device with no session in a state that is not an owned one. That report is accepted: the
+        # session id 0 together with STOPPED / FAULTED / SAFE_OFF cannot belong to another owner, and dropping
+        # it would turn a refused START into "control poll timed out" and a lost link.
+        session_gone = reply.session_id == 0 and reply.state not in OWNED_STATES
         if reply.ok and self.session_id and opcode not in (
-                OP_START, OP_STOP, OP_SAFE_OFF, OP_CLEAR_FAULT, OP_GET_BATTERY) \
-                and reply.session_id != self.session_id:
+                OP_START, OP_STOP, OP_SAFE_OFF, OP_CLEAR_FAULT, OP_GET_BATTERY, OP_GET_PROFILE) \
+                and reply.session_id != self.session_id and not session_gone:
             self.counters["wrong_session"] += 1
             return None
         if reply.ok and opcode == OP_START and not reply.session_id:
@@ -710,6 +723,48 @@ class SessionController:
                                     + (f" ({self.battery.detail})" if self.battery.detail else ""))
             del self.battery_log[:-50]
         return result
+
+    def query_profile(self) -> CommandResult:
+        """Read-only LED profile report (opcode 0x0034). Never changes session, state or lease.
+
+        One attempt with a short timeout so it cannot hold up the owner heartbeat. A missing reply is counted
+        as a profile timeout, not a control timeout. A firmware without the command (UNKNOWN_COMMAND) or one
+        that reports `v4profile=0` is "not available", not an error. `self.profile` keeps the last report."""
+        name = "get_profile"
+        if (not self.connected or self._busy or self.start_uncertain
+                or self.device_state in (ST_STARTING, ST_STOPPING)):
+            return CommandResult(name, False, False, "LOCAL_REJECT", "profile query not allowed now")
+        owned = bool(self.session_id and self.device_state in OWNED_STATES)
+        if owned and self._clock() - self._last_hb > HEARTBEAT_PERIOD_S - PROFILE_TIMEOUT_S:
+            return CommandResult(name, False, False, "LOCAL_REJECT", "owner heartbeat is due first")
+        self.profile_counters["queries"] += 1
+        self._busy = True
+        try:
+            reply = self._request(OP_GET_PROFILE, b"", retries=0, timeout_s=PROFILE_TIMEOUT_S,
+                                  count_timeout=False)
+        except OSError as exc:
+            self.counters["io_errors"] += 1
+            self._forget_link()
+            self._t.close()
+            self._log("link", f"{name}: transport error ({exc}); reconnect required")
+            return CommandResult(name, False, True, "IO_ERROR", str(exc))
+        finally:
+            self._busy = False
+        if reply is None:
+            if not self.connected:
+                return CommandResult(name, False, True, "LINK_LOST", "device rebooted")
+            self.profile_counters["timeouts"] += 1
+            return CommandResult(name, False, True, "TIMEOUT", "no usable reply")
+        if reply.status == STATUS_UNKNOWN_COMMAND:
+            self.profile_counters["unsupported"] += 1
+            self.profile = ProfileReport(False, "unsupported")
+            return CommandResult(name, False, True, reply.status_text, "firmware without get-profile", reply)
+        if not reply.ok:
+            self.profile_counters["errors"] += 1
+            return CommandResult(name, False, True, reply.status_text,
+                                 f"device answered {reply.status_text}", reply)
+        self.profile = reply.profile
+        return CommandResult(name, True, True, "OK", "ok", reply)
 
     def _battery_tick(self, now: float) -> None:
         if (not self.connected or self.start_uncertain or not self.battery_enabled

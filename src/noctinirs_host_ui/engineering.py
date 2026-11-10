@@ -29,9 +29,11 @@ from .widgets import AutoText, ElidedLabel, FadeStack, Section, SmoothScrollArea
 SCREENS = ("Welcome", "Setup", "Live")
 BACKGROUND = ("preview_destination",)  # housekeeping: never shown as "Working", never clears errors
 SETUP_STEPS = ("Device", "MBLL", "Short separation", "Session")
-MIN_WINDOW = (900, 560)       # the smallest supported window; navigation and START/STOP stay reachable
+MIN_WINDOW = (900, 600)       # smallest supported window: START/STOP/recovery, Back and three full channel rows
+                              # stay visible (height budget: tests/ui/test_design_ui.py)
 SIDEBAR_W = 340               # default width of the settings panel (300-480 px, a splitter moves it)
 SIDEBAR_MIN, SIDEBAR_MAX = 300, 480
+FEEDBACK_MAX_H = 44           # px: two lines each for feedback and error (full text in the tooltip)
 
 
 class SessionWorker(QtCore.QThread):
@@ -40,7 +42,7 @@ class SessionWorker(QtCore.QThread):
     updated = QtCore.Signal(object, str)
 
     def __init__(self, geometry, host_sha=None, run_factory=EngineeringRun, parent=None):
-        super().__init__(parent)
+        super().__init__(parent)      # parent=None: the window must not own (and delete) a running thread
         self._run_args = (geometry, host_sha)
         self._run_factory = run_factory
         self._commands = Queue()
@@ -116,7 +118,7 @@ class EngineeringWindow(QtWidgets.QMainWindow):
         self._recovery_buttons = []
         self._default_folder = str(default_recording_folder(documents))
         self.preview_cfg = PreviewConfig()
-        self.worker = SessionWorker(geometry, host_sha, run_factory, self)
+        self.worker = SessionWorker(geometry, host_sha, run_factory)   # no Qt parent: see SessionWorker
         self.worker.updated.connect(self._update)
         self.worker.finished.connect(self._closed_worker)
         help_menu = self.menuBar().addMenu("&Help")
@@ -149,22 +151,27 @@ class EngineeringWindow(QtWidgets.QMainWindow):
         self.screens = FadeStack(self.theme)
         layout.addWidget(self.screens, 1)
         self.feedback = _label(name="feedback")
-        self.feedback.setMaximumHeight(64)   # the navigation row below must always keep its room
+        self.feedback.setMaximumHeight(FEEDBACK_MAX_H)   # the navigation row must always keep its room
         self.feedback.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.NoTextInteraction)
         self.feedback.hide()
-        layout.addWidget(self.feedback)
         self.error = _label(name="error")
-        self.error.setMaximumHeight(64)
+        self.error.setMaximumHeight(FEEDBACK_MAX_H)
         self.error.hide()
-        layout.addWidget(self.error)
         self._form_error = ""
+        # One row at the bottom: Back, the messages (feedback and error) in the middle, Continue. The
+        # messages share the row with the buttons instead of taking two extra rows of height from the graphs.
         nav = QtWidgets.QHBoxLayout()
+        nav.setSpacing(T.SPACE_S)
         layout.addLayout(nav)
         self.back = self._button("Back", self._back)
-        nav.addWidget(self.back)
-        nav.addStretch()
+        nav.addWidget(self.back, 0, QtCore.Qt.AlignmentFlag.AlignBottom)
+        messages = QtWidgets.QVBoxLayout()
+        messages.setSpacing(2)
+        messages.addWidget(self.feedback)
+        messages.addWidget(self.error)
+        nav.addLayout(messages, 1)
         self.next = self._button("Continue", self._advance, primary=True)
-        nav.addWidget(self.next)
+        nav.addWidget(self.next, 0, QtCore.Qt.AlignmentFlag.AlignBottom)
 
         self._welcome()
         self._setup()
@@ -386,6 +393,7 @@ class EngineeringWindow(QtWidgets.QMainWindow):
         """Top: an action bar that never collapses (START, STOP, SAFE_OFF, Disconnect). Below it a settings
         panel (left, foldable sections, collapsible) and the stacked channel rows (right)."""
         page = QtWidgets.QWidget()
+        page.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Ignored)
         outer = QtWidgets.QVBoxLayout(page)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(T.SPACE_S)
@@ -402,7 +410,9 @@ class EngineeringWindow(QtWidgets.QMainWindow):
             row.addWidget(b)
         row.addStretch()
         self._add_recovery(row)
-        outer.addWidget(bar)
+        bar.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
+        outer.addWidget(bar)                  # pinned above the splitter: never scrolls, never clipped
+        self.action_bar = bar
 
         split = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
         split.setChildrenCollapsible(False)
@@ -433,6 +443,9 @@ class EngineeringWindow(QtWidgets.QMainWindow):
         lay.addWidget(self.recording)
         self.loss_label = AutoText(min_lines=2)
         lay.addWidget(self.loss_label)
+        self.profile_line = AutoText(min_lines=3)        # LED calibration profile as the firmware reports it
+        self.profile_line.setAccessibleName("LED calibration profile reported by the firmware")
+        lay.addWidget(self.profile_line)
 
         self.panel = PreviewPanel(self.geometry, self.theme)
         self.panel.detail_changed.connect(self._show_detail)
@@ -475,40 +488,46 @@ class EngineeringWindow(QtWidgets.QMainWindow):
         self.side_scroll = side_scroll
         self.sidebar_open = True
         self._side_anim = None
+        self.theme.motion_changed.connect(self._sidebar_motion_changed)
         split.addWidget(side_scroll)
         split.addWidget(self.panel)
         split.setStretchFactor(0, 0)
         split.setStretchFactor(1, 1)
         split.setSizes([SIDEBAR_W, 960])
-        wrapper = self._scroll(page)
-        wrapper.fade_target = side_scroll      # only the settings panel fades in; the graphs never animate
-        self.screens.addWidget(wrapper)
+        page.fade_target = side_scroll         # only the settings panel fades in; the graphs never animate
+        self.live_page = page
+        self.screens.addWidget(page)
 
     @property
     def sidebar_animating(self) -> bool:
         return self._side_anim is not None and self._side_anim.state() == QtCore.QAbstractAnimation.State.Running
 
+    def _settle_sidebar(self) -> None:
+        scroll = self.side_scroll
+        if self.sidebar_open:
+            scroll.setMinimumWidth(SIDEBAR_MIN)
+            scroll.setMaximumWidth(SIDEBAR_MAX)
+        else:
+            scroll.setVisible(False)
+
+    def _sidebar_motion_changed(self, reduced: bool) -> None:
+        if reduced and self.sidebar_animating:
+            self._side_anim.stop()
+            self._settle_sidebar()
+
     def toggle_sidebar(self) -> None:
         """Collapse or restore the settings panel. START/STOP live in the action bar, so they stay."""
         opening = not self.sidebar_open
         self.sidebar_open = opening
-        self.panel.collapse_button.setText("◀  Panel" if opening else "▶  Panel")
+        self.panel.collapse_button.setText("◀" if opening else "▶")
         if self._side_anim is not None:
             self._side_anim.stop()
         scroll, ms = self.side_scroll, self.theme.ms(200)
-
-        def settle():
-            if opening:
-                scroll.setMinimumWidth(SIDEBAR_MIN)
-                scroll.setMaximumWidth(SIDEBAR_MAX)
-            else:
-                scroll.setVisible(False)
-
         if opening:
             scroll.setVisible(True)
             scroll.setMinimumWidth(0)
             if ms == 0:
-                settle()
+                self._settle_sidebar()
                 return
             start = scroll.width() if scroll.maximumWidth() < SIDEBAR_MAX else 0
             scroll.setMaximumWidth(start)
@@ -516,18 +535,18 @@ class EngineeringWindow(QtWidgets.QMainWindow):
         else:
             scroll.setMinimumWidth(0)
             if ms == 0:
-                settle()
+                self._settle_sidebar()
                 return
             start, end = scroll.width(), 0
             scroll.setMaximumWidth(start)
-        anim = QtCore.QPropertyAnimation(scroll, b"maximumWidth", self)
-        anim.setStartValue(start)
-        anim.setEndValue(end)
-        anim.setDuration(ms)
-        anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
-        anim.finished.connect(settle)
-        anim.start()
-        self._side_anim = anim
+        if self._side_anim is None:            # one animation object, reused by every toggle
+            self._side_anim = QtCore.QPropertyAnimation(scroll, b"maximumWidth", self)
+            self._side_anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+            self._side_anim.finished.connect(self._settle_sidebar)
+        self._side_anim.setStartValue(start)
+        self._side_anim.setEndValue(end)
+        self._side_anim.setDuration(ms)
+        self._side_anim.start()
 
     def _add_recovery(self, row):
         check = self._button("Check START outcome", lambda: self._submit("check_start_outcome"))
@@ -729,9 +748,11 @@ class EngineeringWindow(QtWidgets.QMainWindow):
         if s.get("cleanup"):
             feedback = "\n".join(part for part in (s["cleanup"], feedback) if part)
         self.feedback.setText(feedback)
+        self.feedback.setToolTip(feedback)
         self.feedback.setVisible(bool(feedback))
         errors = "\n".join(part for part in (self._form_error, s.get("error")) if part)
         self.error.setText(errors)
+        self.error.setToolTip(errors)
         self.error.setVisible(bool(errors))
 
         source = "Peer reports SIMULATED" if s.get("simulated") else (
@@ -862,6 +883,7 @@ class EngineeringWindow(QtWidgets.QMainWindow):
                 f"dalam {loss.get('sample_jumps', 0)} lompatan · ±{loss.get('msg_missing', 0)} pesan · "
                 f"gap_before dari perangkat: {loss.get('gap_before_packets', 0)}" if loss else "belum ada data")
             + "\nGap yang dilaporkan perangkat tidak menangkap kehilangan di jaringan; host menghitung lompatan sendiri.")
+        self.profile_line.set_text((s.get("profile") or {}).get("summary", ""))
         self.recording.set_text(f"Recorder  {recorder_state}   |   {_value(s.get('recording_path'))}\n"
                                 f"Preview errors (never affect the RAW file): {s.get('preview_errors', 0)}")
         ready = bool(self._config_ready())
@@ -962,7 +984,15 @@ class EngineeringWindow(QtWidgets.QMainWindow):
         self._render()
 
 
-def main(argv=None):
+def shutdown_worker(worker: SessionWorker) -> None:
+    """Ask a still-running worker to shut down and wait for it. The worker is owned by Python, so this is
+    safe after the window (a C++ object that Qt deletes on close) is gone."""
+    if worker.isRunning():
+        worker.submit("shutdown")
+    worker.wait()
+
+
+def main(argv=None, *, run_factory=EngineeringRun, settings=None, documents=None, on_show=None):
     parser = argparse.ArgumentParser(description="NoctiNIRS 2 Host RAW Engineering")
     parser.add_argument("--host-sha", help="Optional caller-supplied host build SHA")
     args = parser.parse_args(argv)
@@ -970,10 +1000,12 @@ def main(argv=None):
         parser.error("--host-sha must contain 40 hexadecimal characters")
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([sys.argv[0]])
     app.setStyle("Fusion")      # one consistent base style under the generated style sheet
-    window = EngineeringWindow(load_geometry(geometry_path()), args.host_sha)
+    window = EngineeringWindow(load_geometry(geometry_path()), args.host_sha, run_factory=run_factory,
+                               settings=settings, documents=documents)
+    worker = window.worker      # keep our own reference: after the close the window object is deleted by Qt
     window.show()
+    if on_show is not None:     # test hook: called once the window is shown, inside the event loop's start-up
+        on_show(window)
     code = app.exec()
-    if window.worker.isRunning():
-        window.worker.submit("shutdown")
-    window.worker.wait()
+    shutdown_worker(worker)
     return code

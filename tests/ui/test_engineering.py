@@ -11,7 +11,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6 import QtCore, QtTest, QtWidgets
+from PySide6 import QtCore, QtGui, QtTest, QtWidgets
 
 from noctinirs_host.control import protocol as p
 from noctinirs_host.control.session import SessionController
@@ -359,7 +359,9 @@ def test_udp_worker_timeout_keeps_gui_responsive_and_recovery_explicit(window, t
         monkeypatch.setattr(QtWidgets.QMessageBox, "question", confirm)
         safe_button.click()
         wait_for(lambda: not w.state["start_uncertain"])
-        assert "another host" in warning[0] and "reported SAFE_OFF" in w.feedback.text()
+        assert "another host" in warning[0]
+        # durable record, not the transient notice (a recorder-finalization notice may replace it; review race)
+        wait_for(lambda: any("reported SAFE_OFF" in line for line in w.state["log"]))
         assert peer.executed_starts == 1
         w.close()
         wait_for(lambda: w._worker_finished)
@@ -516,7 +518,7 @@ def test_live_layout_controls_left_graphs_right_and_plots_follow_the_window(wind
     screenshot(w, "d3-live-layout.png")
 
 
-def test_click_opens_channel_detail_and_markers_differ_from_gaps(window):
+def test_click_opens_channel_detail_and_markers_differ_from_gaps(window, monkeypatch):
     # CH1 (source L2) gets a small opposite-side step: a warning, the line stays.
     # CH5 is saturated: a gap. SC1L/SC2L are dead, so the left long channels go uncorrected with 5 mm SCR.
     w = fake_window(window, leak={2: 60.0}, saturate=frozenset({(6, 3), (7, 3)}), dead_slots=frozenset({0, 1}))
@@ -530,10 +532,20 @@ def test_click_opens_channel_detail_and_markers_differ_from_gaps(window):
     warn, unc = w.panel.marker_counts("CH1")
     assert warn > 0 and unc > 0 and w.panel.finite_points("CH1") > 0     # flagged but drawn
     assert w.panel.marker_counts("CH5") == (0, 0) and w.panel.finite_points("CH5") == 0   # a gap
-    assert "▲" in w.panel.rows["CH1"].status.text() or "◆" in w.panel.rows["CH1"].status.text()
+    assert "▲" in w.panel.rows["CH1"].status.text()            # warning priority: a channel with both flags shows ▲
     assert "✕" in w.panel.rows["CH5"].status.text()
-    tip = w.panel.rows["CH1"].tip_provider()                   # the tooltip text is built on demand
-    assert "LEAK_WARN" in tip or "tanpa koreksi" in tip
+    only_uncorrected = [n for n in w.panel.longs if w.panel._pts[n] and w.panel._pts[n][-1].state == "VALID"
+                        and w.panel._pts[n][-1].ssr_state == "UNCORRECTED" and not w.panel._pts[n][-1].warnings]
+    assert only_uncorrected                                    # the uncorrected state is asserted on its own (D4-10)
+    assert all("◆" in w.panel.rows[n].status.text() for n in only_uncorrected)
+    shown = []                                                 # the real Qt tooltip event path, not tip_provider
+    monkeypatch.setattr(QtWidgets.QToolTip, "showText", lambda *args, **kwargs: shown.append(args[1]))
+    for name, expected in (("CH1", "LEAK_WARN"), (only_uncorrected[0], "tanpa koreksi")):
+        row = w.panel.rows[name]
+        point = QtCore.QPoint(10, 10)
+        event = QtGui.QHelpEvent(QtCore.QEvent.Type.ToolTip, point, row.mapToGlobal(point))
+        QtWidgets.QApplication.sendEvent(row, event)
+        assert expected in shown[-1], (name, shown[-1])
     w.panel.rows["SC1L"].name_button.click()                   # click opens the channel detail
     assert w.panel.current == "SC1L" and "SC1L_I735" in w.detail.toPlainText()
     w.panel.plots["CH1"].scene().sigMouseClicked.emit(None)    # a click on a plot selects it as well

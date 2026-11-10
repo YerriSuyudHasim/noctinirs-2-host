@@ -23,6 +23,7 @@ from ..wire.envelope import (
     PROTOCOL_VERSION, parse_envelope,
 )
 from ..wire.errors import WireError
+from .profile import ProfileReport, args_set_profile, parse_profile  # noqa: F401 (re-exported)
 
 FIRMWARE_PIN = "bd880f5890ea1a72d54e8ab9cc2ed55f002d1382"
 # Battery query (opcode 0x0033) is pinned separately. FIRMWARE_PIN above also feeds the RAW
@@ -45,16 +46,22 @@ OP_SET_FS = 0x0100
 OP_SET_LED_CURRENT = 0x0101
 OP_SET_MODE = 0x0102  # one byte: 0 ACQ, 1 ENGINEERING; STOPPED only
 OP_GET_BATTERY = 0x0033  # no arguments; read-only; any session id; never refreshes a lease
+# LED IREF calibration profile (firmware Calib Stage-1 FIX1; pins and format in control/profile.py).
+OP_GET_PROFILE = 0x0034  # no arguments; read-only; ASCII key=value report; any peer, like get_config
+OP_SET_PROFILE = 0x0103  # 56 B: id u32 LE, hash[32], code[20]; STOPPED only; cached. Never sent automatically.
+OP_CLEAR_PROFILE = 0x0104  # no arguments; STOPPED only; cached. Never sent automatically.
 
 OPCODE_NAMES = {
     OP_HEARTBEAT: "heartbeat", OP_INFO: "info", OP_STATUS: "status",
     OP_GET_CONFIG: "get_config", OP_GET_TIME: "get_time", OP_START: "start_stream",
     OP_STOP: "stop_stream", OP_SAFE_OFF: "safe_off", OP_CLEAR_FAULT: "clear_fault",
     OP_SET_FS: "set_fs", OP_SET_LED_CURRENT: "set_led_current", OP_SET_MODE: "set_mode",
-    OP_GET_BATTERY: "get_battery",
+    OP_GET_BATTERY: "get_battery", OP_GET_PROFILE: "get_profile", OP_SET_PROFILE: "set_profile",
+    OP_CLEAR_PROFILE: "clear_profile",
 }
 TIMED_OPS = (OP_HEARTBEAT, OP_STATUS, OP_GET_TIME)  # carry an opaque u64 host timestamp
-MUTATING_OPS = (OP_START, OP_STOP, OP_CLEAR_FAULT, OP_SET_FS, OP_SET_LED_CURRENT, OP_SET_MODE)
+MUTATING_OPS = (OP_START, OP_STOP, OP_CLEAR_FAULT, OP_SET_FS, OP_SET_LED_CURRENT, OP_SET_MODE,
+                OP_SET_PROFILE, OP_CLEAR_PROFILE)
 
 STATUS_NAMES = ("OK", "INVALID_STATE", "INVALID_ARG", "UNKNOWN_COMMAND", "HW_FAULT", "BUSY",
                 "BAD_FRAME", "PRECONDITION_FAILED", "RESERVED_FLAGS")
@@ -228,6 +235,7 @@ class Reply:
     t_host_us: int | None = None
     t_tx_us: int | None = None
     battery: BatteryReading | None = None
+    profile: ProfileReport | None = None
 
     @property
     def ok(self) -> bool:
@@ -298,6 +306,8 @@ def decode_reply(datagram: bytes) -> Reply:
             kw["counters"] = {**dict(zip(names, vals)), "grace_active": grace}
     elif opcode == OP_GET_BATTERY:
         kw["battery"] = parse_battery(bytes(ext))
+    elif opcode == OP_GET_PROFILE:
+        kw["profile"] = parse_profile(bytes(ext))   # never raises: unknown keys and odd values are kept apart
     elif ext:
         raise WireError("reply_ext", "unexpected command data")
     return Reply(req_id, opcode, status, state, fault, bool(simulated), boot_id, t_rx,

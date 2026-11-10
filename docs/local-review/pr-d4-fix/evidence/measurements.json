@@ -1,0 +1,319 @@
+{
+  "measured_in": "offscreen Qt (not a device, not native Windows rendering)",
+  "layout": [
+    {
+      "theme": "light",
+      "window": [
+        900,
+        600
+      ],
+      "state": "ordinary",
+      "sidebar_open": true,
+      "viewport_h": 237,
+      "row_h": 72,
+      "row_floor": 48,
+      "full_rows_at_top": [
+        "CH1",
+        "CH2",
+        "CH3"
+      ],
+      "visible_fraction": {
+        "START": 1.0,
+        "STOP": 1.0,
+        "Disconnect": 1.0
+      }
+    },
+    {
+      "theme": "light",
+      "window": [
+        900,
+        600
+      ],
+      "state": "lost-START",
+      "sidebar_open": true,
+      "viewport_h": 177,
+      "row_h": 52,
+      "row_floor": 48,
+      "full_rows_at_top": [
+        "CH1",
+        "CH2",
+        "CH3"
+      ],
+      "visible_fraction": {
+        "START": 1.0,
+        "STOP": 1.0,
+        "Disconnect": 1.0,
+        "Check START outcome": 1.0,
+        "SAFE_OFF": 1.0
+      }
+    },
+    {
+      "theme": "light",
+      "window": [
+        1024,
+        600
+      ],
+      "state": "ordinary",
+      "sidebar_open": true,
+      "viewport_h": 251,
+      "row_h": 77,
+      "row_floor": 48,
+      "full_rows_at_top": [
+        "CH1",
+        "CH2",
+        "CH3"
+      ],
+      "visible_fraction": {
+        "START": 1.0,
+        "STOP": 1.0,
+        "Disconnect": 1.0
+      }
+    },
+    {
+      "theme": "light",
+      "window": [
+        1024,
+        600
+      ],
+      "state": "lost-START",
+      "sidebar_open": true,
+      "viewport_h": 191,
+      "row_h": 57,
+      "row_floor": 48,
+      "full_rows_at_top": [
+        "CH1",
+        "CH2",
+        "CH3"
+      ],
+      "visible_fraction": {
+        "START": 1.0,
+        "STOP": 1.0,
+        "Disconnect": 1.0,
+        "Check START outcome": 1.0,
+        "SAFE_OFF": 1.0
+      }
+    },
+    {
+      "theme": "light",
+      "window": [
+        1366,
+        768
+      ],
+      "state": "ordinary",
+      "sidebar_open": true,
+      "viewport_h": 433,
+      "row_h": 137,
+      "row_floor": 48,
+      "full_rows_at_top": [
+        "CH1",
+        "CH2",
+        "CH3"
+      ],
+      "visible_fraction": {
+        "START": 1.0,
+        "STOP": 1.0,
+        "Disconnect": 1.0
+      }
+    },
+    {
+      "theme": "light",
+      "window": [
+        1366,
+        768
+      ],
+      "state": "lost-START",
+      "sidebar_open": true,
+      "viewport_h": 373,
+      "row_h": 117,
+      "row_floor": 48,
+      "full_rows_at_top": [
+        "CH1",
+        "CH2",
+        "CH3"
+      ],
+      "visible_fraction": {
+        "START": 1.0,
+        "STOP": 1.0,
+        "Disconnect": 1.0,
+        "Check START outcome": 1.0,
+        "SAFE_OFF": 1.0
+      }
+    },
+    {
+      "theme": "dark",
+      "window": [
+        900,
+        600
+      ],
+      "state": "ordinary",
+      "sidebar_open": true,
+      "viewport_h": 237,
+      "row_h": 72,
+      "row_floor": 48,
+      "full_rows_at_top": [
+        "CH1",
+        "CH2",
+        "CH3"
+      ],
+      "visible_fraction": {
+        "START": 1.0,
+        "STOP": 1.0,
+        "Disconnect": 1.0
+      }
+    },
+    {
+      "theme": "dark",
+      "window": [
+        900,
+        600
+      ],
+      "state": "lost-START",
+      "sidebar_open": true,
+      "viewport_h": 177,
+      "row_h": 52,
+      "row_floor": 48,
+      "full_rows_at_top": [
+        "CH1",
+        "CH2",
+        "CH3"
+      ],
+      "visible_fraction": {
+        "START": 1.0,
+        "STOP": 1.0,
+        "Disconnect": 1.0,
+        "Check START outcome": 1.0,
+        "SAFE_OFF": 1.0
+      }
+    },
+    {
+      "theme": "dark",
+      "window": [
+        1024,
+        600
+      ],
+      "state": "ordinary",
+      "sidebar_open": true,
+      "viewport_h": 251,
+      "row_h": 77,
+      "row_floor": 48,
+      "full_rows_at_top": [
+        "CH1",
+        "CH2",
+        "CH3"
+      ],
+      "visible_fraction": {
+        "START": 1.0,
+        "STOP": 1.0,
+        "Disconnect": 1.0
+      }
+    },
+    {
+      "theme": "dark",
+      "window": [
+        1024,
+        600
+      ],
+      "state": "lost-START",
+      "sidebar_open": true,
+      "viewport_h": 191,
+      "row_h": 57,
+      "row_floor": 48,
+      "full_rows_at_top": [
+        "CH1",
+        "CH2",
+        "CH3"
+      ],
+      "visible_fraction": {
+        "START": 1.0,
+        "STOP": 1.0,
+        "Disconnect": 1.0,
+        "Check START outcome": 1.0,
+        "SAFE_OFF": 1.0
+      }
+    },
+    {
+      "theme": "dark",
+      "window": [
+        1366,
+        768
+      ],
+      "state": "ordinary",
+      "sidebar_open": true,
+      "viewport_h": 433,
+      "row_h": 137,
+      "row_floor": 48,
+      "full_rows_at_top": [
+        "CH1",
+        "CH2",
+        "CH3"
+      ],
+      "visible_fraction": {
+        "START": 1.0,
+        "STOP": 1.0,
+        "Disconnect": 1.0
+      }
+    },
+    {
+      "theme": "dark",
+      "window": [
+        1366,
+        768
+      ],
+      "state": "lost-START",
+      "sidebar_open": true,
+      "viewport_h": 373,
+      "row_h": 117,
+      "row_floor": 48,
+      "full_rows_at_top": [
+        "CH1",
+        "CH2",
+        "CH3"
+      ],
+      "visible_fraction": {
+        "START": 1.0,
+        "STOP": 1.0,
+        "Disconnect": 1.0,
+        "Check START outcome": 1.0,
+        "SAFE_OFF": 1.0
+      }
+    }
+  ],
+  "contrast": {
+    "light": {
+      "legend_swatch_vs": {
+        "surface": 3.87,
+        "surface_raised(selected row)": 3.42,
+        "plot_background": 3.87
+      },
+      "legend_text_vs": {
+        "surface": 13.72,
+        "surface_raised(selected row)": 12.15,
+        "plot_background": 13.72
+      },
+      "warning_marker_vs": {
+        "surface": 5.18,
+        "surface_raised(selected row)": 4.59,
+        "plot_background": 5.18
+      },
+      "hbo_curve_vs_plot": 3.87
+    },
+    "dark": {
+      "legend_swatch_vs": {
+        "surface": 8.9,
+        "surface_raised(selected row)": 7.82,
+        "plot_background": 9.43
+      },
+      "legend_text_vs": {
+        "surface": 13.56,
+        "surface_raised(selected row)": 11.91,
+        "plot_background": 14.36
+      },
+      "warning_marker_vs": {
+        "surface": 8.93,
+        "surface_raised(selected row)": 7.84,
+        "plot_background": 9.46
+      },
+      "hbo_curve_vs_plot": 9.43
+    }
+  }
+}

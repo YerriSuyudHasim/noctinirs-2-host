@@ -206,12 +206,13 @@ def test_exactly_three_rows_fill_the_visible_area_and_the_rest_scrolls(make_wind
     QtTest.QTest.qWait(150)
     p = w.panel
     visible = p.fully_visible_rows()
+    assert visible[:3] == ["CH1", "CH2", "CH3"]               # at every size, the declared minimum included (D4-03)
     if size != MIN_WINDOW:
         assert visible == ["CH1", "CH2", "CH3"]
         vh = p.scroll.viewport().height()
         assert abs(3 * p.row_height() + DIVIDER_H - vh) < 3 + DIVIDER_H  # three rows plus the divider fill it
     else:
-        assert p.row_height() == ROW_MIN_H and len(visible) >= 1          # small window: the minimum height
+        assert p.row_height() >= ROW_MIN_H                    # the budgeted floor, never below it
     bar = p.scroll.verticalScrollBar()
     assert bar.maximum() > 0
     p.scroll.scroll_to(bar.maximum())

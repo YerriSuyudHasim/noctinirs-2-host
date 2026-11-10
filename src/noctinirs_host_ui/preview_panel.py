@@ -183,9 +183,14 @@ class PreviewSettingsForm(QtWidgets.QWidget):
 
 
 VISIBLE_ROWS = 3          # exactly this many channel rows fill the visible area at the top
-ROW_MIN_H = 96            # px: a sensible minimum when the window is small
-DIVIDER_H = 28            # px: the "Left hemisphere / Right hemisphere" bands
-FOOTER_H = 46             # px: the shared time axis
+ROW_MIN_H = 48            # px: the least a row needs (channel name + one status line); the window minimum
+                          # is budgeted so that three rows of this height always fit (see MIN_WINDOW)
+ROW_FULL_H = 96           # px: from this height a row also shows its meta line and trace legend
+DIVIDER_H = 20            # px: the "Left hemisphere / Right hemisphere" bands
+FOOTER_H = 40             # px: the shared time axis
+INFO_W = 132              # px: the label column of a row
+ROW_MARGIN_L, ROW_MARGIN_R, ROW_SPACING = 8, 6, 8
+AXIS_W = 48               # px: the (invisible, in the footer) y axis of every plot
 DISPLAY_HZ = 25           # one display refresh timer, decoupled from acquisition
 SHARED_SCALE_PERIOD_S = 0.5
 Y_SHRINK_RATIO = 1.8      # keep the y range until it is this much wider than the data needs
@@ -209,24 +214,48 @@ def channel_order(geometry) -> list:
 
 
 def peak_decimate(x: np.ndarray, y: np.ndarray, max_points: int):
-    """Min/max per bin so spikes survive; NaN gaps stay NaN. Returns (x, y)."""
+    """Min/max per bin so spikes survive. Returns (x, y), at most about `max_points` points.
+
+    Display only. Every run of finite samples is decimated on its own and the runs are joined by a single
+    NaN separator, so a gap (one invalid sample or many) always breaks the line. Inside a bin the minimum
+    and the maximum keep their real time order and their own timestamps."""
     n = len(x)
     if n <= max_points or max_points < 4:
         return x, y
-    bins = max_points // 2
-    idx = np.linspace(0, n, bins + 1).astype(int)[:-1]
-    idx = np.unique(idx)
-    lo = np.fmin.reduceat(y, idx)
-    hi = np.fmax.reduceat(y, idx)
-    xs = x[idx]
-    xo = np.empty(2 * len(idx))
-    yo = np.empty(2 * len(idx))
-    xo[0::2], xo[1::2] = xs, xs
-    # order min/max by which comes first inside the bin so the line does not zig-zag
-    first_is_lo = np.ones(len(idx), dtype=bool)
-    yo[0::2] = np.where(first_is_lo, lo, hi)
-    yo[1::2] = np.where(first_is_lo, hi, lo)
-    return xo, yo
+    finite = np.isfinite(y)
+    if not finite.any():
+        return x[:1], y[:1]
+    edges = np.flatnonzero(np.diff(finite.astype(np.int8)))
+    starts = np.concatenate(([0], edges + 1))
+    stops = np.concatenate((edges + 1, [n]))
+    runs = [(a, b) for a, b in zip(starts, stops) if finite[a]]
+    gaps = len(runs) - 1
+    bins = max(1, (max_points - 2 * len(runs) - gaps) // 2)
+    step = max(1, -(-int(finite.sum()) // bins))             # samples per bin (ceiling division)
+    xs_out, ys_out = [], []
+    for k, (a, b) in enumerate(runs):
+        if k:                                                 # the separator sits on the first missing sample
+            xs_out.append(x[runs[k - 1][1]:runs[k - 1][1] + 1])
+            ys_out.append(np.array([np.nan]))
+        length = b - a
+        if length <= 2 or step <= 2:                           # nothing to gain: keep the samples as they are
+            xs_out.append(x[a:b])
+            ys_out.append(y[a:b])
+            continue
+        bins_n = -(-length // step)
+        pad = np.full(bins_n * step, np.nan)
+        pad[:length] = y[a:b]
+        pad = pad.reshape(bins_n, step)
+        i_lo = np.nanargmin(pad, axis=1)
+        i_hi = np.nanargmax(pad, axis=1)
+        base = a + np.arange(bins_n) * step
+        first = base + np.minimum(i_lo, i_hi)
+        second = base + np.maximum(i_lo, i_hi)
+        idx = np.empty(2 * bins_n, dtype=int)
+        idx[0::2], idx[1::2] = first, second
+        xs_out.append(x[idx])
+        ys_out.append(y[idx])
+    return np.concatenate(xs_out), np.concatenate(ys_out)
 
 
 class _PassPlot(pg.PlotWidget):
@@ -234,6 +263,27 @@ class _PassPlot(pg.PlotWidget):
 
     def wheelEvent(self, event):  # noqa: N802 (Qt name)
         event.ignore()
+
+
+class _ExactXViewBox(pg.ViewBox):
+    """A view box that follows the time range of the view it is X-linked to *exactly*.
+
+    pyqtgraph's own link code re-maps the range through each view's screen geometry, and that geometry
+    (`ViewBox.screenGeometry`) adds the widget's offset inside its parent. The footer axis sits in another
+    parent than the row plots, so the re-mapping shifted t=0 by the difference (8 px, review D4-07). The
+    footer is laid out to the same pixels as the rows (`PreviewPanel._align_footer`), so a plain copy of
+    the range is both simpler and exact."""
+
+    def linkedViewChanged(self, view, axis):  # noqa: N802 (pyqtgraph name)
+        if axis != pg.ViewBox.XAxis or view is None or self.linksBlocked:
+            return super().linkedViewChanged(view, axis)
+        view.blockLink(True)
+        try:
+            lo, hi = view.viewRange()[0]
+            self.enableAutoRange(pg.ViewBox.XAxis, False)
+            self.setXRange(lo, hi, padding=0)
+        finally:
+            view.blockLink(False)
 
 
 class ChannelRow(QtWidgets.QFrame):
@@ -251,13 +301,13 @@ class ChannelRow(QtWidgets.QFrame):
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setProperty("selected", False)
         lay = QtWidgets.QHBoxLayout(self)
-        lay.setContentsMargins(8, 4, 6, 4)
-        lay.setSpacing(8)
+        lay.setContentsMargins(ROW_MARGIN_L, 3, ROW_MARGIN_R, 3)
+        lay.setSpacing(ROW_SPACING)
         info = QtWidgets.QWidget()
-        info.setFixedWidth(132)
+        info.setFixedWidth(INFO_W)
         col = QtWidgets.QVBoxLayout(info)
         col.setContentsMargins(0, 0, 0, 0)
-        col.setSpacing(2)
+        col.setSpacing(1)
         self.name_button = QtWidgets.QPushButton(ch.name)
         self.name_button.setObjectName("rowname")
         self.name_button.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
@@ -270,7 +320,9 @@ class ChannelRow(QtWidgets.QFrame):
         self.status = QtWidgets.QLabel("…")
         self.status.setTextFormat(QtCore.Qt.TextFormat.RichText)
         self.status.setObjectName("rowmeta")
-        self.status.setWordWrap(True)
+        self.status.setWordWrap(False)           # one line: a long warning list is shortened, see _status_text
+        self.status.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Preferred)
+        self.compact = False
         for w in (self.name_button, self.meta, self.legend, self.status):
             col.addWidget(w)
         col.addStretch()
@@ -278,6 +330,7 @@ class ChannelRow(QtWidgets.QFrame):
         self.plot = _PassPlot()
         self.plot.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Expanding)
         self.plot.setMinimumHeight(40)
+        self.plot.setMinimumWidth(60)
         lay.addWidget(self.plot, 1)
         self.plot.scene().sigMouseClicked.connect(lambda _e: self.clicked.emit(self.name))
 
@@ -286,6 +339,14 @@ class ChannelRow(QtWidgets.QFrame):
             QtWidgets.QToolTip.showText(event.globalPos(), self.tip_provider(), self)
             return True
         return super().event(event)
+
+    def set_compact(self, compact: bool) -> None:
+        """A short row keeps the channel name and the quality status; the meta line and the trace legend
+        (the same for every row, shown once under the graphs) are left out. The text is not lost: the
+        row tooltip and the channel detail carry it."""
+        self.compact = compact
+        for w in (self.meta, self.legend):
+            w.setVisible(not compact)
 
     def set_selected(self, on: bool) -> None:
         if self.property("selected") != on:
@@ -339,24 +400,29 @@ class PreviewPanel(QtWidgets.QWidget):
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Expanding)
         outer = QtWidgets.QVBoxLayout(self)
-        outer.setContentsMargins(8, 8, 8, 8)
-        outer.setSpacing(6)
+        outer.setContentsMargins(8, 6, 8, 6)
+        outer.setSpacing(4)
 
         top = QtWidgets.QHBoxLayout()
         outer.addLayout(top)
         self.collapse_button = QtWidgets.QToolButton()
-        self.collapse_button.setText("◀  Panel")
+        self.collapse_button.setText("◀")
+        self.collapse_button.setAccessibleName("Toggle the settings panel")
+        self.collapse_button.setFixedWidth(36)
         self.collapse_button.setToolTip("Sembunyikan atau tampilkan panel pengaturan")
+        self.collapse_button.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Fixed)
         self.collapse_button.clicked.connect(self.sidebar_toggle_requested.emit)
         top.addWidget(self.collapse_button)
-        self.banner = QtWidgets.QLabel(f"{PREVIEW_LABEL} · Δ = perubahan dari baseline")
-        self.banner.setObjectName("previewbanner")
+        from .widgets import WrapLabel
+        self.banner = WrapLabel(f"{PREVIEW_LABEL} · Δ = perubahan dari baseline")
+        self.banner.setObjectName("panelbanner")        # wraps to the width it gets: the warning is never cut
         top.addWidget(self.banner, 1)
         self.jump_combo = QtWidgets.QComboBox()
         self.jump_combo.addItem("Ke channel…", None)
         for name in self.order:
             self.jump_combo.addItem(name, name)
         _compact(self.jump_combo)
+        self.jump_combo.setFixedWidth(124)
         self.jump_combo.setToolTip("Lompat ke channel")
         self.jump_combo.activated.connect(self._jump)
         top.addWidget(self.jump_combo)
@@ -393,6 +459,7 @@ class PreviewPanel(QtWidgets.QWidget):
         # the stack of rows
         self.scroll = SmoothScrollArea(theme)
         self.scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self.scroll.stops = self.row_stops
         self.rows_host = QtWidgets.QWidget()
         self.rows_host.setObjectName("rowshost")
         host = QtWidgets.QVBoxLayout(self.rows_host)
@@ -423,31 +490,34 @@ class PreviewPanel(QtWidgets.QWidget):
 
         # one shared time axis, linked to every row
         self.master = self.rows[self.order[0]].plot
+        self.master.installEventFilter(self)
         for name in self.order:
             plot = self.rows[name].plot
             plot.getPlotItem().hideAxis("bottom")
             if plot is not self.master:
                 plot.getPlotItem().vb.setXLink(self.master.getPlotItem().vb)
-        self.footer = _PassPlot()
+        self.footer = _PassPlot(viewBox=_ExactXViewBox())
         self.footer.setFixedHeight(FOOTER_H)
         self.footer.setMenuEnabled(False)
         self.footer.hideButtons()
         fitem = self.footer.getPlotItem()
         left = fitem.getAxis("left")           # an invisible left axis: the same width as the rows' axes,
-        left.setWidth(48)                      # so the shared time axis lines up with every plot
+        left.setWidth(AXIS_W)                  # so the shared time axis lines up with every plot
         left.setStyle(showValues=False, tickLength=0)
         left.setPen(pg.mkPen(None))
         fitem.getViewBox().setMouseEnabled(False, False)
         fitem.getAxis("bottom").setLabel("s (sweep time, shared by all rows)")
         fitem.getViewBox().setXLink(self.master.getPlotItem().vb)
-        foot = QtWidgets.QHBoxLayout()
-        foot.setContentsMargins(148, 0, 6, 0)     # lines the axis up with the plots (label column + margins)
-        foot.addWidget(self.footer)
-        outer.addLayout(foot)
+        self.foot_layout = QtWidgets.QHBoxLayout()
+        self.foot_layout.setContentsMargins(0, 0, 0, 0)   # set by _align_footer from the real row geometry
+        self.foot_layout.addWidget(self.footer)
+        outer.addLayout(self.foot_layout)
+        self._align_footer()
 
         self.legend = QtWidgets.QLabel()
-        self.legend.setObjectName("muted")
+        self.legend.setObjectName("legend")
         self.legend.setWordWrap(True)
+        self.legend.setTextFormat(QtCore.Qt.TextFormat.RichText)
         outer.addWidget(self.legend)
 
         self.timer = QtCore.QTimer(self)
@@ -472,7 +542,7 @@ class PreviewPanel(QtWidgets.QWidget):
         # Only the time grid: pyqtgraph's y grid doubled the paint cost (measured). A cheap zero line
         # marks the baseline of the delta values instead.
         item.showGrid(x=True, y=False, alpha=0.25)
-        item.getAxis("left").setWidth(48)
+        item.getAxis("left").setWidth(AXIS_W)
         font = w.font()
         font.setPointSize(8)
         item.getAxis("left").setStyle(tickFont=font)
@@ -531,6 +601,14 @@ class PreviewPanel(QtWidgets.QWidget):
         t = self._tokens
         return (t.hbo, t.hbr) if self.mode == "Hb" else (t.od_a, t.od_b)
 
+    def _trace_legend(self, c1: str, c2: str, n1: str, n2: str) -> str:
+        """A colour swatch (a graphic, 3:1 is enough) followed by the name in the normal text colour
+        (text needs 4.5:1; the trace colours alone do not reach it on the selected-row surface)."""
+        text = self._tokens.text_primary
+        return (f"<span style='color:{c1}'><b>━</b></span><span style='color:{text}'><b>&nbsp;{n1}</b></span>"
+                f"&nbsp;&nbsp;<span style='color:{c2}'><b>━</b></span><span style='color:{text}'>"
+                f"<b>&nbsp;{n2}</b></span>")
+
     def _trace_names(self):
         return {"Hb": ("ΔHbO", "ΔHbR"), "OD": ("OD 735", "OD 850"), "I": ("I 735", "I 850")}[self.mode]
 
@@ -542,14 +620,14 @@ class PreviewPanel(QtWidgets.QWidget):
                 color = (c1, c2)[k % 2]
                 width = TRACE_WIDTH if k < 2 else 1.2
                 curve.setPen(pg.mkPen(color, width=width, style=curve._nn2_style))
-            row.legend.setText(f"<span style='color:{c1}'><b>━ {n1}</b></span>&nbsp; "
-                               f"<span style='color:{c2}'><b>━ {n2}</b></span>")
+            row.legend.setText(self._trace_legend(c1, c2, n1, n2))
         t = self._tokens
         self.legend.setText(
-            f"<b>Celah</b> = data hilang atau invalid · <span style='color:{t.marker_warning}'><b>▲</b></span> "
-            f"peringatan (LOW_SIGNAL / LEAK_WARN), garis tetap tampil · "
+            f"{self._trace_legend(c1, c2, n1, n2)} · <b>Celah</b> = data hilang/invalid · "
+            f"<span style='color:{t.marker_warning}'><b>▲</b></span> "
+            f"peringatan (LOW_SIGNAL / LEAK_WARN) · "
             f"<span style='color:{t.marker_uncorrected}'><b>◆</b></span> tanpa koreksi SCR · "
-            f"<span style='color:{t.marker_clamp}'><b>●</b></span> di luar skala (ditandai) · label 735/850 nominal")
+            f"<span style='color:{t.marker_clamp}'><b>●</b></span> di luar skala · label 735/850 nominal")
 
     # ---- controls ------------------------------------------------------------------------------
     def set_fs(self, fs: float | None) -> None:
@@ -566,10 +644,9 @@ class PreviewPanel(QtWidgets.QWidget):
             self.scale_combo.addItem(label, s)
         self.scale_combo.blockSignals(False)
         self.scale = None
-        self._shared = None
         if hasattr(self, "rows"):
             self._paint_traces()
-        self._dirty_rows = set(self.order)
+        self._reset_ranges()
 
     def _window_changed(self, *_):
         self.window_s = self.window_combo.currentData()
@@ -578,12 +655,20 @@ class PreviewPanel(QtWidgets.QWidget):
 
     def _scale_changed(self, *_):
         self.scale = self.scale_combo.currentData()
-        self._shared = None
-        self._dirty_rows = set(self.order)
+        self._reset_ranges()
 
     def _lock_changed(self, on: bool) -> None:
         self.lock_scale = bool(on)
+        self._reset_ranges()
+
+    def _reset_ranges(self) -> None:
+        """Forget every cached y range (the shared one and each row's own) and redraw: a range that was
+        right for another mode, scale policy, channel set or lock state must never linger."""
         self._shared = None
+        self._shared_at = 0.0
+        if hasattr(self, "rows"):
+            for row in self.rows.values():
+                row.ylim = None
         self._dirty_rows = set(self.order)
 
     def _apply_window(self) -> None:
@@ -601,9 +686,9 @@ class PreviewPanel(QtWidgets.QWidget):
         for cols in self._cols.values():
             for lst in cols.values():
                 lst.clear()
-        self._dirty_rows = set(self.order)
+        self._reset_ranges()
         for name, row in self.rows.items():
-            row.ylim = None
+            row.status_key = None               # the next unchanged quality value must repaint its text
             row.status.setText("…")
             for curve in self.curves[name]:
                 curve.setData([], [])
@@ -664,7 +749,9 @@ class PreviewPanel(QtWidgets.QWidget):
         elif p.state == "BASELINE":
             text, color = "… baseline", t.text_secondary
         elif p.warnings:
-            text, color = "▲ " + ", ".join(p.warnings), t.warning
+            shown = ", ".join(p.warnings) if len(p.warnings) == 1 or not row.compact else (
+                f"{p.warnings[0]} +{len(p.warnings) - 1}")      # a short row has one line; the tooltip has all
+            text, color = "▲ " + shown, t.warning
         elif p.ssr_state == "UNCORRECTED":
             text, color = "◆ tanpa koreksi SCR", t.marker_uncorrected
         else:
@@ -706,6 +793,8 @@ class PreviewPanel(QtWidgets.QWidget):
     def eventFilter(self, obj, event):  # noqa: N802 (Qt name)
         if obj is self.scroll.viewport() and event.type() == QtCore.QEvent.Type.Resize:
             self._relayout()
+        elif obj is self.master and event.type() in (QtCore.QEvent.Type.Resize, QtCore.QEvent.Type.Move):
+            self._align_footer()             # the rows have just been laid out: follow where their plots are
         return super().eventFilter(obj, event)
 
     def showEvent(self, event):  # noqa: N802 (Qt name)
@@ -718,15 +807,36 @@ class PreviewPanel(QtWidgets.QWidget):
         self.timer.stop()                # a hidden panel does not even wake up
 
     def row_height(self) -> int:
+        """Height of one row: the viewport minus one divider band, shared by three rows, so that the top
+        of the list shows a divider and three complete rows. ROW_MIN_H is a floor for tiny viewports; the
+        window minimum is budgeted so that the floor is never what decides in a supported window."""
         vh = self.scroll.viewport().height()
         return max(ROW_MIN_H, (vh - DIVIDER_H) // VISIBLE_ROWS)
 
     def _relayout(self) -> None:
         h = self.row_height()
+        compact = h < ROW_FULL_H
         for row in self.rows.values():
             if row.height() != h or row.minimumHeight() != h:
                 row.setFixedHeight(h)
+            row.set_compact(compact)
+        self._align_footer()
         self._dirty_rows = set(self.order)
+
+    def _align_footer(self) -> None:
+        """The footer axis must map time to the same pixels as the row plots. Its margins are taken from
+        where a row plot really is (label column, row frame, the scroll bar the rows lose), not from
+        constants, so a style-sheet change cannot shift it again."""
+        if not hasattr(self, "foot_layout"):
+            return
+        plot = self.master
+        outer = self.layout().contentsMargins()
+        left = plot.mapTo(self, QtCore.QPoint(0, 0)).x()
+        right = self.width() - outer.right() - (left + plot.width())
+        margins = (max(0, left - outer.left()), 0, max(0, right), 0)
+        current = self.foot_layout.contentsMargins()
+        if (current.left(), current.top(), current.right(), current.bottom()) != margins:
+            self.foot_layout.setContentsMargins(*margins)
 
     def visible_names(self, margin: int = 0) -> list:
         top = self.scroll.verticalScrollBar().value() - margin
@@ -742,6 +852,11 @@ class PreviewPanel(QtWidgets.QWidget):
 
     def _scrolled(self, *_):
         self._dirty_rows |= set(self.visible_names())
+
+    def row_stops(self) -> list:
+        """Scroll positions the mouse wheel moves between: the top of the list (the first divider) and the
+        top edge of every row, so a settled wheel position never splits a row."""
+        return [0] + [self.rows[n].y() for n in self.order]
 
     def _jump(self, index: int) -> None:
         name = self.jump_combo.itemData(index)
@@ -780,23 +895,34 @@ class PreviewPanel(QtWidgets.QWidget):
         return None
 
     def _shared_limits(self, start: int):
-        """One y range for every row (the lock): the union of the rows' own robust limits."""
-        if self.scale == "full":
-            return None
+        """The one y range every row takes while the lock is on: the union of the rows' own limits (robust
+        or fixed ±scale) or, for Full range, of all their data. Kept with the same hysteresis as a row's
+        own range, but once for all rows, so they can never disagree."""
         now = time.monotonic()
         if self._shared is not None and now - self._shared_at < SHARED_SCALE_PERIOD_S:
             return self._shared
-        w = float(self.window_s)
-        t_last = self._tl[-1]
         lo, hi = math.inf, -math.inf
         for name in self.order:
             t, y1, y2, _, _ = self._mode_arrays(name, start)
-            lim = self._row_limits([y1, y2], np.ones(len(t), dtype=bool))
+            if self.scale == "full":
+                vals = np.concatenate((y1[np.isfinite(y1)], y2[np.isfinite(y2)]))
+                lim = (float(vals.min()), float(vals.max())) if vals.size else None
+            else:
+                lim = self._row_limits([y1, y2], np.ones(len(t), dtype=bool))
             if lim is not None:
                 lo, hi = min(lo, lim[0]), max(hi, lim[1])
-        self._shared = (lo, hi) if lo < hi else None
         self._shared_at = now
         self._dirty_rows = set(self.order)
+        if not lo < hi:
+            if lo == hi and math.isfinite(lo):
+                pad = max(abs(lo), 1e-9) * 0.05
+                lo, hi = lo - pad, hi + pad
+            else:
+                return self._shared
+        cur = self._shared
+        if (cur is None or lo < cur[0] - 1e-12 or hi > cur[1] + 1e-12
+                or (cur[1] - cur[0]) > Y_SHRINK_RATIO * (hi - lo)):
+            self._shared = (lo, hi)
         return self._shared
 
     def refresh(self) -> None:
@@ -825,9 +951,14 @@ class PreviewPanel(QtWidgets.QWidget):
             new = passes == cur_pass
             old = (passes == cur_pass - 1) & (x > cursor_x + erase)
             shown = new | old
-            limits = shared if (self.lock_scale and shared is not None) else self._row_limits(ys, shown)
+            locked = self.lock_scale and shared is not None
+            limits = shared if locked else self._row_limits(ys, shown)
             vb = row.plot.getPlotItem().getViewBox()
-            if limits is not None:
+            if locked:
+                if row.ylim != shared:           # the same tuple for every row, applied exactly
+                    row.ylim = shared
+                    vb.setYRange(shared[0], shared[1], padding=0)
+            elif limits is not None:
                 # Hysteresis: moving the y range regenerates the axis (the costly part of a draw), so the range
                 # only moves when the data leaves it or it became much too large.
                 cur = row.ylim
@@ -841,7 +972,7 @@ class PreviewPanel(QtWidgets.QWidget):
                     row.ylim = None
                 vb.enableAutoRange("y", True)
             clamp_xy = []
-            if limits is not None:
+            if limits is not None and self.scale != "full":      # Full range never clamps or marks
                 lo, hi = limits
                 for k, y in enumerate(ys):
                     over = np.isfinite(y) & ((y < lo) | (y > hi))

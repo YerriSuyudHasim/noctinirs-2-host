@@ -23,6 +23,8 @@ QLabel#sectiontitle { font-size: ${type_m}px; font-weight: 600; }
 QLabel#banner { font-size: ${type_s}px; font-weight: 600; padding: ${space_xs}px ${space_s}px; }
 QLabel#previewbanner { background: $warning_bg; color: $warning; border: 1px solid $warning;
     border-radius: ${radius_s}px; padding: ${space_xs}px ${space_s}px; font-weight: 600; }
+QLabel#panelbanner { background: $warning_bg; color: $warning; border: 1px solid $warning;
+    border-radius: ${radius_s}px; padding: 2px ${space_s}px; font-weight: 600; font-size: ${type_xs}px; }
 QLabel#step, QLabel#feedback, QLabel#detail { background: $surface_raised; border: 1px solid $border;
     border-radius: ${radius_m}px; padding: ${space_s}px; }
 QLabel#error { color: $danger; background: $danger_bg; border: 1px solid $danger;
@@ -33,6 +35,7 @@ QPushButton#rowname:hover { color: $accent; background: transparent; }
 QPushButton#rowname:focus { border: 0; padding: 0; text-decoration: underline; }
 QFrame#channelrow { background: $surface; border: 0; border-bottom: 1px solid $border; border-left: 3px solid transparent; }
 QFrame#channelrow[selected="true"] { background: $surface_raised; border-left: 3px solid $accent; }
+QLabel#legend { color: $text_secondary; font-size: ${type_xs}px; }
 QLabel#rowmeta { color: $text_secondary; font-size: ${type_xs}px; }
 QLabel#hemisphere { color: $text_secondary; font-size: ${type_xs}px; font-weight: 600; letter-spacing: 1px; }
 
