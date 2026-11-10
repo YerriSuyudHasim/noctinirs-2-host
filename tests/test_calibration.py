@@ -5,7 +5,7 @@ from math import sqrt
 
 import pytest
 
-from noctinirs_host.calibration import Assumptions, DetectorModel, Level, empirical_choice, model_choice, x_min
+from noctinirs_host.calibration import Assumptions, DetectorModel, Level, empirical_choice, model_bounds, model_choice, x_min
 from noctinirs_host.calibration_sweep import SweepPlan
 from noctinirs_host.control import protocol as p
 from noctinirs_host.control.default_table import SHORT_SLOTS
@@ -20,14 +20,28 @@ from test_udp_session import Clock
 def test_rev22_section_8():
     params = Assumptions()
     assert x_min(86, 30, .005) == pytest.approx(2857.684, abs=.001)
-    for k, sigma, expected_snr in [(70, 30, 100.70), (1730 / 30, sqrt(144**2 - 8.65**2), 19.94)]:
+    for k, sigma, expected_snr, after_drift in [
+        (70, 30, 100.70, 84.51), (1730 / 30, sqrt(144**2 - 8.65**2), 19.94, 15.98),
+    ]:
         detector = DetectorModel(.225 * k, 200000, 0, sigma, .005)
         choice = model_choice([detector], [0], float, 1, 222, 10, params)
         assert choice.code == 222 and "LOW_SIGNAL" in choice.flags
         assert detector.snr(detector.k * choice.code) == pytest.approx(expected_snr, abs=.01)
+        assert detector.snr(detector.k * choice.code * .8) == pytest.approx(after_drift, abs=.01)
+        if sigma == 30:
+            assert choice.down == pytest.approx(.97883, abs=.00001)
+            assert detector.snr(detector.k * 133) == pytest.approx(65.923, abs=.001)
+        else:
+            assert "SNR_BELOW_FLOOR" in choice.flags
     detectors = [DetectorModel(.225 * k, 200000, 0, 100, .005) for k in (29700, 273000)]
-    for up, down, delta, code in [(1, 0, 0, 10), (1, 0, .05, 9), (.2, .2, .05, 13), (1, .5, .05, 13)]:
+    assert x_min(86, 100, .005) == pytest.approx(9525.615, abs=.001)
+    assert detectors[1].l0 + detectors[1].k * 133 == 8369525
+    for up, down, delta, code, lower, upper in [
+        (1, 0, 0, 10, 1.4255, 63.241), (1, 0, .05, 9, 1.4255, 60.230),
+        (.2, .2, .05, 13, 1.7818, 100.383), (1, .5, .05, 13, 2.8509, 60.230),
+    ]:
         p = replace(params, upward_drift=up, downward_drift=down, prediction_error=delta)
+        assert model_bounds(detectors, [0], 10, p) == pytest.approx((lower, upper), abs=.001)
         assert model_choice(detectors, [0], float, 1, 222, 10, p).code == code
 
 

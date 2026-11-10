@@ -599,9 +599,16 @@ def test_real_wizard_gates_start_before_and_after_a_fake_sweep(window):
     from noctinirs_host.calibration import Assumptions
     from noctinirs_host.calibration_sweep import SweepPlan
 
-    origin = time.monotonic()
-    clock = lambda: (time.monotonic() - origin) * 8
-    w = window(run_factory=lambda *args: EngineeringRun(
+    from test_udp_session import Clock
+
+    clock = Clock()
+
+    class TickClockRun(EngineeringRun):
+        def tick(self):
+            clock.now += .1
+            super().tick()
+
+    w = window(run_factory=lambda *args: TickClockRun(
         *args, controller_factory=lambda transport: SessionController(transport, clock),
         fake_options={"clock": clock}, calibration_params=Assumptions(min_occurrences=4),
         sweep_plan=SweepPlan((8, 67, 133), (4, 16, 67), 1)))
@@ -609,7 +616,7 @@ def test_real_wizard_gates_start_before_and_after_a_fake_sweep(window):
     assert not w.start_button.isEnabled()
     w.record_check.setChecked(False)
     start_calibration = w._calibration_controls[-1][0]
-    assert start_calibration.isEnabled()
+    wait_for(start_calibration.isEnabled)
     start_calibration.click()
     wait_for(lambda: w.start_button.isEnabled(), seconds=15)
     w.start_button.click()

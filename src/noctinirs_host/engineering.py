@@ -297,8 +297,8 @@ class EngineeringRun:
 
     def configure(self, fs: int | None) -> None:
         ctl = self.controller
-        if not self.stopped or self.recorder is not None:
-            raise ValueError("Configuration requires STOPPED and a closed recorder.")
+        if not self.stopped or self.recorder is not None or self.sweep is not None:
+            raise ValueError("Configuration requires STOPPED with no recorder or sweep in progress.")
         if ctl.info.get("frames") != "RAW_ENGINEERING":
             raise ValueError("The peer did not advertise RAW_ENGINEERING in INFO.")
         if fs not in ctl.settings.fs_allowed:
@@ -595,6 +595,7 @@ class EngineeringRun:
         self._auto_wait = None
         try:
             self._require_ready()
+            self._require_calibration()
         except ValueError as exc:
             self.fail(str(exc))
             return
@@ -1108,7 +1109,7 @@ class EngineeringRun:
             except (ValueError, OSError) as exc:
                 self.fail(str(exc))
         if self.recorder_state in ("ARMED", "RECORDING"):
-            error = self.recorder.metadata()["writer_error"]
+            error = self.recorder.error
             if error:
                 self.fail(f"RAW writer error: {error}. Acquisition is controlled separately.")
                 self._finalize(ctl.recording_snapshot())

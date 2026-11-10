@@ -942,7 +942,8 @@ class EngineeringWindow(QtWidgets.QMainWindow):
                                  f"Device mode  {_value(s.get('mode'))}   |   Nominal optical Fs  "
                                  f"{_value(s.get('fs'))} Hz")
         self.fs.setEnabled(capable and bool(rates) and not busy)
-        self.apply.setEnabled(bool(s.get("stopped") and capable and not busy and self._desired_fs in rates))
+        self.apply.setEnabled(bool(s.get("stopped") and capable and not busy
+                                   and not s.get("calibrating") and self._desired_fs in rates))
         self._render_battery()
         self._render_capture()
 

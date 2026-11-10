@@ -195,7 +195,7 @@ def evidence(report, reply):
 def config_metadata(plan, params):
     return dict(parameters=asdict(params), sweep_grid=asdict(plan),
                 flags=["ASSUMED_REV22_PARAMETERS", "ENBW_PLACEHOLDER", "D1_ANCHOR_UNAVAILABLE",
-                       "WHITENESS_UNVERIFIED", "GAIN_READBACK_UNAVAILABLE"],
+                       "WHITENESS_UNVERIFIED", "GAIN_READBACK_UNAVAILABLE", "SPECTRAL_PROFILE_UNAVAILABLE"],
                 estimator="RAW scheduled ON_STABLE minus OFF_STABLE means",
                 spectral_profile=None)
 
