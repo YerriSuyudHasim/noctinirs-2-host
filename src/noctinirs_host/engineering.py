@@ -13,7 +13,8 @@ import sys
 import time
 
 from .control.engineering_fake import EngineeringFake
-from .control.profile import profile_codes_event_text, profile_event_text, profile_summary
+from .control.profile import (profile_attribution, profile_codes_event_text, profile_event_text,
+                              profile_ids_event_text, profile_summary)
 from .control.protocol import ST_SAFE_OFF, ST_STARTING, ST_STOPPED, ST_STOPPING, ST_STREAMING
 from .control.session import LoopbackTransport, SessionController
 from .control.udp import UDPTransport
@@ -27,6 +28,13 @@ from .wire.optical import parse_raw
 
 UNKNOWN = "Unknown / unavailable"
 STOP_WAIT_S = 5.0
+# H-05: SAFE_OFF is acknowledged by the comm layer before the firmware control worker has finished its
+# cleanup and recorded the STOP evidence (control_off -> control_run_stop). The one diagnostic get-profile
+# after SAFE_OFF is therefore deferred. 1.0 s matches the firmware STOP evidence deadline
+# (CONTROL_STOP_EVIDENCE_DEADLINE_US); it is an assumption, not a bench measurement. The read is still one
+# send with the 0.4 s profile timeout; if it is not allowed before the limit, a "not read" event is written.
+SAFE_OFF_PROFILE_DELAY_S = 1.0
+SAFE_OFF_PROFILE_LIMIT_S = 3.0
 RECORD_STEM = "record_"
 _RECORD_FILE = re.compile(r"^record_(\d+)(\.json|\.csv|\.raw\.bin|\.raw\.csv|\.preview\.json)$")
 
@@ -159,6 +167,7 @@ class EngineeringRun:
         self._await_running = False
         self._running_seen = False
         self._await_end = False
+        self._deferred_profile: dict | None = None     # one get-profile scheduled after SAFE_OFF (H-05)
 
     @property
     def connected(self) -> bool:
@@ -211,6 +220,8 @@ class EngineeringRun:
         ctl.profile_enabled = True  # read-only query; "not available" on firmware without get-profile
         self.profile_view = None
         self._await_running = self._await_end = False
+        self._session_id = None
+        self._deferred_profile = None
         self._result(ctl.connect())
         self.context = ctl.recording_snapshot()
         self._profile_query("connect")
@@ -327,6 +338,8 @@ class EngineeringRun:
         self._preview_gap_sent = False
         self.preview = PreviewPipeline(self.geometry, self.preview_config,
                                        self.controller.settings.fs_hz or 10)
+        self._session_id = None                 # a previous run's session never labels this one
+        self._await_running = self._await_end = False
         result = self.controller.start()
         if self.controller.start_uncertain:
             self.configured = False
@@ -338,6 +351,10 @@ class EngineeringRun:
             context["start_outcome"] = "unresolved"
             if self.recorder is not None:
                 self.recorder.event("cleanup", message)
+                # H-05: no session was ever acknowledged, so no end read can be attributed to this recording
+                self.recorder.event("profile", "phase=end_missing attributed=0 basis=start_unresolved "
+                                    "end_evidence=MISSING reason=START ownership was never established "
+                                    "(no START ACK); no end get-profile read belongs to this recording")
                 self._finalize(context)
             return
         if result.ok:
@@ -412,9 +429,25 @@ class EngineeringRun:
             raise ValueError(f"SAFE_OFF not confirmed. Device reported {result.reply.state_text}.")
         self._stop_deadline = None
         self._note("Device reported SAFE_OFF. Physical LED state has not been measured.")
-        if self._await_end and self._profile_query("ended"):
-            self._await_end = False
-        self._finalize(ctl.recording_snapshot())
+        reply = result.reply
+        recording = self.recorder is not None and self.recorder_state in ("ARMED", "RECORDING")
+        if recording:
+            # H-05: the ACK is its own event; the STOP evidence is written by the firmware after cleanup
+            self.recorder.event("safe_off", (
+                f"SAFE_OFF ACK reply_session={reply.session_id} reply_state={reply.state_text} "
+                f"boot=0x{reply.boot_id:X}; STOP evidence is recorded by the firmware after its cleanup; "
+                f"one get-profile read deferred {SAFE_OFF_PROFILE_DELAY_S:g} s"
+                + (" (link lost: no read possible)" if not self.connected else ""))[:500])
+        candidate = self._session_id if self._await_end else None
+        self._await_end = self._await_running = False
+        if not self.connected:
+            if recording:
+                self.recorder.event("profile", "phase=after_safe_off not read: no live link")
+                self._finalize(ctl.recording_snapshot())
+            return
+        now = time.monotonic()
+        self._deferred_profile = {"due": now + SAFE_OFF_PROFILE_DELAY_S, "limit": now + SAFE_OFF_PROFILE_LIMIT_S,
+                                  "candidate": candidate}
 
     def stop(self) -> None:
         ctl = self.controller
@@ -440,32 +473,82 @@ class EngineeringRun:
         self._finalize(self._observe(profile_phase="ended"))
 
     # ---- LED calibration profile report (read-only) ------------------------------------------------
-    def _profile_query(self, phase: str) -> bool:
+    def _profile_query(self, phase: str, *, candidate: int | None = None) -> bool:
         """Read get-profile once and remember it for the status area; when a recorder is open, write what the
         device reported (or that it could not be read) as sidecar events. False = not allowed right now
-        (the caller may try again later). A missing, old or odd reply never fails the session."""
+        (nothing was sent; the caller may try again later). A missing, old or odd reply never fails the
+        session.
+
+        H-01: the report is device-wide. It is attributed to this run only when the request carried the live
+        owned session id and the reply reports that same id (`basis=owner`). A reply naming another session
+        is a device diagnostic (`basis=foreign`, sidecar kind `profile_device`, no `session=`). Session 0
+        after this run ended is `basis=detached`: unattributed, with the run's id only as a candidate."""
         ctl = self.controller
         if ctl is None or not ctl.profile_enabled or not self.connected:
             return False
+        sent_session = ctl.session_id if ctl.device_state in (ST_STARTING, ST_STREAMING, ST_STOPPING) else 0
         result = ctl.query_profile()
         if result.status == "LOCAL_REJECT":
             return False
         report = ctl.profile if (result.ok or result.status == "UNKNOWN_COMMAND") else None
         failure = "" if report is not None else f"get-profile {result.status}: {result.message}"
+        reply = result.reply
+        provenance = None
+        reply_state = None
+        if reply is not None:
+            provenance = profile_attribution(reply.session_id, sent_session=sent_session, phase=phase,
+                                             candidate_session=candidate if candidate is not None
+                                             else self._session_id)
+            reply_state = reply.state_text
         self.profile_view = {"phase": phase, "report": report, "failure": failure,
-                             "boot_id": ctl.boot_id, "session_id": self._session_id}
-        self._event(f"LED profile ({phase}): " + (profile_summary(report).splitlines()[0] if report else failure))
+                             "boot_id": ctl.boot_id, "provenance": provenance, "reply_state": reply_state}
+        self._event(f"LED profile ({phase}): " + (profile_summary(report).splitlines()[0] if report else failure)
+                    + (f" [{provenance['basis']}]" if provenance else ""))
         if self.recorder is not None and self.recorder_state in ("ARMED", "RECORDING"):
+            foreign = bool(provenance and provenance["basis"] == "foreign")
+            kind = "profile_device" if foreign else "profile"
             if report is None:
-                self.recorder.event("profile", f"phase={phase} not read: {failure}"[:500])
+                self.recorder.event(kind, f"phase={phase} not read: {failure}"[:500])
             else:
                 epoch = self.latest_raw.get("epoch")
-                self.recorder.event("profile", profile_event_text(
-                    report, phase=phase, boot_id=ctl.boot_id, session_id=self._session_id, plan_epoch=epoch))
+                boot = reply.boot_id if reply is not None else ctl.boot_id
+                line = profile_event_text(
+                    report, phase=phase, boot_id=boot, plan_epoch=epoch,
+                    provenance=provenance or {"attributed": False, "basis": "no_session", "reply_session": 0},
+                    reply_state=reply_state)
+                self.recorder.event(kind, line)
+                if "=in_profile_ids" in line:
+                    self.recorder.event(kind + "_ids", profile_ids_event_text(report, phase=phase))
                 codes = profile_codes_event_text(report)
-                if codes:
+                if codes and not foreign:
                     self.recorder.event("profile_codes", codes)
         return True
+
+    def _deferred_follow(self) -> None:
+        """H-05: the one get-profile after SAFE_OFF, once the firmware has had time to record its STOP
+        evidence. Then the recording (if any) is finalized. Bounded: one send at most, and a "not read"
+        event when the read is not allowed before the limit or the link is gone."""
+        d = self._deferred_profile
+        if d is None:
+            return
+        now = time.monotonic()
+        if self.connected and now < d["due"]:
+            return
+        done = False
+        if self.connected and now < d["limit"]:
+            done = self._profile_query("after_safe_off", candidate=d["candidate"])
+            if not done:
+                return                          # not allowed right now; nothing was sent
+        self._deferred_profile = None
+        recording = self.recorder is not None and self.recorder_state in ("ARMED", "RECORDING")
+        if not done:
+            reason = "no live link" if not self.connected else \
+                f"not allowed within {SAFE_OFF_PROFILE_LIMIT_S:g} s of SAFE_OFF"
+            self._event(f"LED profile (after_safe_off): not read ({reason})")
+            if recording:
+                self.recorder.event("profile", f"phase=after_safe_off not read: {reason}")
+        if recording:
+            self._finalize(self.controller.recording_snapshot() if self.controller else None)
 
     def _profile_follow(self) -> None:
         """Read the report when the owned session reaches STREAMING and again when it has ended (normal STOP,
@@ -586,6 +669,10 @@ class EngineeringRun:
         ctl = self.controller
         self._event(message)
         self._preview_gap("disconnected")
+        if self._deferred_profile is not None:
+            self._deferred_profile = None
+            if ctl and self.recorder_state in ("ARMED", "RECORDING"):
+                self.recorder.event("profile", "phase=after_safe_off not read: link closed first")
         if ctl and self.recorder_state in ("ARMED", "RECORDING"):
             self.recorder.event("cleanup", message)
         if ctl:
@@ -682,6 +769,7 @@ class EngineeringRun:
             ctl.battery_log.clear()
         if self.preview_active and self.stopped:
             self._end_preview("session ended")
+        self._deferred_follow()
         self._poll_disk()
         self._launch_auto()
         if (self._auto_finalize and self.recorder_state in ("ARMED", "RECORDING") and self.stopped
@@ -731,8 +819,19 @@ class EngineeringRun:
         view = self.profile_view
         if view is None:
             return {"summary": profile_summary(None), "report": None, "phase": None}
-        return {"summary": profile_summary(view["report"], failure=view["failure"]), "report": view["report"],
-                "phase": view["phase"], "integrity_blocked": bool(view["report"] and view["report"].integrity_blocked)}
+        summary = profile_summary(view["report"], failure=view["failure"])
+        prov = view.get("provenance")
+        if prov is not None and view["report"] is not None and view["report"].supported:
+            summary += "\n" + {
+                "owner": f"Report bound to this host's session {prov.get('session')}.",
+                "foreign": f"Report while another owner holds session {prov.get('reply_session')}: device "
+                           "diagnostic, not evidence for this host's run.",
+                "detached": f"Device-wide report read after session {prov.get('candidate_session')} ended "
+                            "(session 0): not bound to that run.",
+                "no_session": "Device-wide report; no session of this host.",
+            }.get(prov.get("basis"), "")
+        return {"summary": summary, "report": view["report"], "phase": view["phase"], "provenance": prov,
+                "integrity_blocked": bool(view["report"] and view["report"].integrity_blocked)}
 
     def _drain_preview(self) -> list:
         out, self._preview_out = self._preview_out, []

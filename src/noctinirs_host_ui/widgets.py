@@ -303,7 +303,11 @@ class Section(QtWidgets.QWidget):
 
 
 class SmoothScrollArea(QtWidgets.QScrollArea):
-    """A vertical scroll area whose mouse wheel eases to its target (only the scroll position moves)."""
+    """A vertical scroll area whose mouse wheel eases to its target (only the scroll position moves).
+
+    With `stops` set, every operator scroll settles on a stop: the wheel, the scroll bar's single/page
+    steps (arrows, groove clicks, keyboard) and the end of a slider drag. The bar maximum is always a stop
+    (bottom-aligned view). Programmatic `setValue` is not changed."""
 
     def __init__(self, theme=None, parent=None) -> None:
         super().__init__(parent)
@@ -313,9 +317,66 @@ class SmoothScrollArea(QtWidgets.QScrollArea):
         self._anim: QtCore.QPropertyAnimation | None = None
         self.setWidgetResizable(True)
         self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.verticalScrollBar().setSingleStep(48)
+        bar = self.verticalScrollBar()
+        bar.setSingleStep(48)
+        bar.actionTriggered.connect(self._bar_action)
+        bar.sliderReleased.connect(self.snap_to_nearest)
         if theme is not None:
             theme.motion_changed.connect(self._motion_changed)
+
+    _STEP_ADD = (QtWidgets.QAbstractSlider.SliderAction.SliderSingleStepAdd,
+                 QtWidgets.QAbstractSlider.SliderAction.SliderPageStepAdd)
+    _STEP_SUB = (QtWidgets.QAbstractSlider.SliderAction.SliderSingleStepSub,
+                 QtWidgets.QAbstractSlider.SliderAction.SliderPageStepSub)
+    _PAGE = (QtWidgets.QAbstractSlider.SliderAction.SliderPageStepAdd,
+             QtWidgets.QAbstractSlider.SliderAction.SliderPageStepSub)
+
+    def snap_stops(self) -> list:
+        """The stops clamped to the bar range, plus both ends of the range (sorted, unique)."""
+        bar = self.verticalScrollBar()
+        lo, hi = bar.minimum(), bar.maximum()
+        if self.stops is None:
+            return [lo, hi]
+        return sorted({max(lo, min(hi, int(v))) for v in self.stops()} | {lo, hi})
+
+    @staticmethod
+    def _action_id(action) -> int:
+        return int(getattr(action, "value", action))
+
+    def _bar_action(self, action) -> None:
+        """A scroll-bar step (arrow, groove click, keyboard): move to the next stop in that direction.
+        Called by Qt before the value changes, so the slider position can still be redirected."""
+        if self.stops is None:
+            return
+        code = self._action_id(action)
+        add = code in {self._action_id(a) for a in self._STEP_ADD}
+        sub = code in {self._action_id(a) for a in self._STEP_SUB}
+        if not (add or sub):
+            return
+        bar = self.verticalScrollBar()
+        if self._anim is not None and self._anim.state() == QtCore.QAbstractAnimation.State.Running:
+            self._anim.stop()
+        current, proposed = bar.value(), bar.sliderPosition()
+        page = code in {self._action_id(a) for a in self._PAGE}
+        stops = self.snap_stops()
+        if add:
+            later = [v for v in stops if v > current + 1]
+            within = [v for v in later if v <= proposed] if page else []
+            target = within[-1] if within else (later[0] if later else bar.maximum())
+        else:
+            earlier = [v for v in stops if v < current - 1]
+            within = [v for v in earlier if v >= proposed] if page else []
+            target = within[0] if within else (earlier[-1] if earlier else bar.minimum())
+        self._target = target
+        bar.setSliderPosition(target)
+
+    def snap_to_nearest(self) -> None:
+        """End of a slider drag: settle on the nearest stop."""
+        if self.stops is None:
+            return
+        bar = self.verticalScrollBar()
+        value = bar.value()
+        self.scroll_to(min(self.snap_stops(), key=lambda v: (abs(v - value), v)))
 
     def scroll_to(self, value: int) -> None:
         bar = self.verticalScrollBar()

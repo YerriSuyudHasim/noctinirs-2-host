@@ -41,6 +41,10 @@ TRANSITION_POLL_S = 0.05  # nn2ctl stop confirmation poll cadence
 START_REPLY_WINDOW_S = 1.5  # bounded original transaction, at most the owner silence interval
 START_QUIET_S = 1.5 + 3.0  # firmware silence + grace; a wait is not STOP evidence
 OWNED_STATES = (ST_STARTING, ST_STREAMING, ST_STOPPING)
+# B-01: a reply with session id 0 is accepted for a held session only in one of these explicit terminal
+# states and only for these read-only observation commands (see SessionController._accept).
+TERMINAL_STATES = (ST_STOPPED, ST_FAULTED, ST_SAFE_OFF)
+SESSION_GONE_OPS = (OP_STATUS, OP_INFO, OP_GET_CONFIG)
 
 
 class Transport(Protocol):
@@ -315,10 +319,15 @@ class SessionController:
         # endpoint. It is data about the device, never a session to adopt or reject.
         # get_profile likewise reports the device's current session, which may be another endpoint's.
         # A START that the device ends after its ACK (FIX1: PROFILE_NOT_APPLIED, START_FAILED, START_CANCELLED)
-        # leaves the device with no session in a state that is not an owned one. That report is accepted: the
-        # session id 0 together with STOPPED / FAULTED / SAFE_OFF cannot belong to another owner, and dropping
-        # it would turn a refused START into "control poll timed out" and a lost link.
-        session_gone = reply.session_id == 0 and reply.state not in OWNED_STATES
+        # leaves the device with no session in a terminal state. Firmware FIX2 answers a STATUS / INFO /
+        # get_config that still carries the ended session id with INVALID_STATE and session 0 (handled below
+        # as "session gone"). A peer that answers such a read with OK and session 0 is accepted only for those
+        # observation commands and only in an explicit terminal state (STOPPED / FAULTED / SAFE_OFF): that
+        # report cannot belong to another owner, and dropping it would turn a refused START into "control
+        # poll timed out". Session 0 with BOOT / RECOVERING / an owned state, or on a heartbeat or a setting
+        # command, stays a wrong-session reply (compatibility allowance, not a firmware path).
+        session_gone = (reply.session_id == 0 and reply.state in TERMINAL_STATES
+                        and opcode in SESSION_GONE_OPS)
         if reply.ok and self.session_id and opcode not in (
                 OP_START, OP_STOP, OP_SAFE_OFF, OP_CLEAR_FAULT, OP_GET_BATTERY, OP_GET_PROFILE) \
                 and reply.session_id != self.session_id and not session_gone:
@@ -725,11 +734,19 @@ class SessionController:
         return result
 
     def query_profile(self) -> CommandResult:
-        """Read-only LED profile report (opcode 0x0034). Never changes session, state or lease.
+        """Read-only LED profile report (opcode 0x0034). Never changes the host's session or state.
 
-        One attempt with a short timeout so it cannot hold up the owner heartbeat. A missing reply is counted
-        as a profile timeout, not a control timeout. A firmware without the command (UNKNOWN_COMMAND) or one
-        that reports `v4profile=0` is "not available", not an error. `self.profile` keeps the last report."""
+        Lease: the firmware (patch 0004, nn2_app_comm.c) checks lease expiry before it answers, and a
+        successful GET_PROFILE that carries the current owner's session id refreshes the owner activity
+        anchor like any successful owner request; with session id 0 it does not. The host does not count
+        the query as a heartbeat and leaves its own heartbeat schedule unchanged.
+
+        Identity: the report is device-wide. The reply's session id is the device's current session (which
+        may be another endpoint's) and is returned in `CommandResult.reply` for attribution by the caller;
+        it is never adopted. One attempt with a short timeout so it cannot hold up the owner heartbeat. A
+        missing reply is counted as a profile timeout, not a control timeout. A firmware without the command
+        (UNKNOWN_COMMAND) or one that reports `v4profile=0` is "not available", not an error.
+        `self.profile` keeps the last report."""
         name = "get_profile"
         if (not self.connected or self._busy or self.start_uncertain
                 or self.device_state in (ST_STARTING, ST_STOPPING)):

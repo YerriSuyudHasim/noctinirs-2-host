@@ -1,6 +1,6 @@
 """LED IREF calibration profile: `get-profile` (0x0034) reply parser, and request/test encoders.
 
-Read-only support for the firmware "Calib Stage-1 FIX1" report. The host never fits, selects, derives or
+Read-only support for the firmware "Calib Stage-1" report (FIX1 key set, FIX2 evidence values). The host never fits, selects, derives or
 sends a profile on its own; this module only decodes what the device reports.
 
 Pinned source (the host does not extend the protocol; changes are raised in `noctinirs-2`):
@@ -11,8 +11,13 @@ Pinned source (the host does not extend the protocol; changes are raised in `noc
     0004 sha256 c691ab5392982ea08de619e4d70e6196789748e0d30f03c31181f54ff122e585   (FIX2: stop_evidence
          gains NOT_RUN and UNAVAILABLE; no key added or removed, worst case still 1404 of 1412 bytes)
   docs/adr/0004-host-protocol.md section 15 and docs/FW_CALIB_STAGE1_IREF_PROFILE.md, revision
-  "local amendment (Stage 1 calibration FIX1) 2026-11-10". The series is not committed in the firmware
-  repository yet, so there is no commit SHA: the patch hashes above identify the contract.
+  "local amendment (Stage 1 calibration FIX2) 2026-11-10" (patch 0004; Status stays Proposed), which
+  amends the FIX1 revision of the same date. The series is not committed in the firmware repository yet,
+  so there is no commit SHA: the patch hashes above identify the contract.
+Lease (nn2_app_comm.c in patch 0004): GET_PROFILE is answered to every peer (a device-wide report). A
+  request that carries the current owner's session id refreshes that owner's activity anchor like any
+  successful owner request; a request with session id 0 does not. The reply's session id is the device's
+  CURRENT session, which may belong to another endpoint, and no key binds the report to one session.
 Not verified against a device. The text format was taken from the patch sources and the FIX1 report.
 
 Wire format (text, ASCII, `key=value` separated by single spaces; no value contains a space):
@@ -23,6 +28,11 @@ Wire format (text, ASCII, `key=value` separated by single spaces; no value conta
   iref_ua_per_lsb iref_code_default iref_code_max
 or `v4profile=0 reason=unsupported|overflow`. Worst case 1404 of 1412 bytes. FIX1 removed `stop_read`.
 Clients must ignore unknown keys (ADR-0004 section 15); this parser does, and keeps them.
+
+Integrity (fail closed): the effective stop integrity is OK only for stop_evidence=VALID_MATCH with
+stop_integrity=OK, stop_match=1 and stop_error=0 (as FIX2 emits it), and only when none of the
+integrity keys (INTEGRITY_KEYS) was sent twice. Every occurrence of those keys is kept verbatim in
+`raw_integrity` for investigation.
 """
 
 from __future__ import annotations
@@ -50,6 +60,8 @@ DOCUMENTED_EVIDENCE = ("NONE", "VALID_MATCH", "VALID_MISMATCH", "TRANSPORT_ERR",
                        "NOT_RUN", "UNAVAILABLE")
 # stop_integrity as the firmware derives it from the evidence (nn2_led_stop_integrity_name)
 INTEGRITY_OF = {"VALID_MATCH": "OK", "VALID_MISMATCH": "BLOCKED", "TRANSPORT_ERR": "BLOCKED"}
+# keys whose value decides the stop integrity; a duplicate of any of them makes the report UNVERIFIED
+INTEGRITY_KEYS = ("stop_evidence", "stop_integrity", "stop_match", "stop_error", "stop_slot")
 
 _HEX_HASH = re.compile(r"[0-9a-f]{64}")
 _INT = re.compile(r"-?\d{1,11}")
@@ -116,17 +128,24 @@ class ProfileReport:
     warnings: tuple = ()
     present: frozenset = frozenset()      # known keys that were sent
     text: str = ""                        # the received text (for the sidecar and for debugging)
+    integrity_issues: tuple = ()          # why the integrity fields cannot be trusted (then UNVERIFIED)
+    raw_integrity: tuple = ()             # ((key, raw value), ...) every occurrence of INTEGRITY_KEYS, in order
 
     @property
     def stop_integrity_effective(self) -> str:
         """What the host will write down. The device value is used only when it agrees with the evidence
-        class documented by the firmware; otherwise (absent, unknown, contradictory) it is UNVERIFIED.
-        The host never turns missing evidence into OK."""
+        class documented by the firmware; otherwise (absent, unknown, duplicated, contradictory) it is
+        UNVERIFIED. OK additionally needs stop_match=1 and stop_error=0, as FIX2 emits for VALID_MATCH.
+        The host never turns missing or ambiguous evidence into OK."""
         evidence = self.stop_evidence
-        if evidence not in DOCUMENTED_EVIDENCE:
+        if self.integrity_issues or evidence not in DOCUMENTED_EVIDENCE:
             return "UNVERIFIED"
         expected = INTEGRITY_OF.get(evidence, "UNVERIFIED")
-        return self.stop_integrity if self.stop_integrity == expected else "UNVERIFIED"
+        if self.stop_integrity != expected:
+            return "UNVERIFIED"
+        if expected == "OK" and (self.stop_match is not True or self.stop_error != 0):
+            return "UNVERIFIED"
+        return expected
 
     @property
     def integrity_blocked(self) -> bool:
@@ -171,6 +190,8 @@ def parse_profile(ext: bytes | str) -> ProfileReport:
     warnings: list[str] = []
     unknown: list[tuple] = []
     ignored: list[str] = []
+    raw_integrity: list[tuple] = []
+    issues: list[str] = []
     for token in tokens[1:]:
         if not token:
             continue
@@ -178,8 +199,13 @@ def parse_profile(ext: bytes | str) -> ProfileReport:
         if not eq or not key:
             warnings.append(f"token without key=value: {token[:24]!r}")
             continue
+        if key in INTEGRITY_KEYS and len(raw_integrity) < 16:
+            raw_integrity.append((key, value[:24]))
         if key in values or any(k == key for k, _ in unknown):
             warnings.append(f"duplicate key {key[:32]}")
+            if key in INTEGRITY_KEYS and f"duplicate:{key}" not in issues:
+                issues.append(f"duplicate:{key}")
+                warnings.append(f"duplicate integrity key {key}: stop integrity UNVERIFIED")
             continue
         if key in KNOWN_KEYS:
             values[key] = value
@@ -222,12 +248,25 @@ def parse_profile(ext: bytes | str) -> ProfileReport:
     if evidence in DOCUMENTED_EVIDENCE and integrity in INTEGRITY \
             and integrity != INTEGRITY_OF.get(evidence, "UNVERIFIED"):
         warnings.append(f"stop_integrity={integrity} contradicts stop_evidence={evidence}")
+    if evidence == "VALID_MATCH":
+        # FIX2 emits VALID_MATCH only with stop_integrity=OK stop_match=1 stop_error=0 (nn2_app_comm.c);
+        # anything else is a contradiction the host does not resolve in favour of OK
+        if fields.get("stop_match") is not True:
+            issues.append("valid_match_without_stop_match_1")
+        if fields.get("stop_error") != 0:
+            issues.append("valid_match_with_stop_error")
+        for issue in issues:
+            if issue.startswith("valid_match"):
+                warnings.append(f"{issue}: stop integrity UNVERIFIED")
+    elif evidence in DOCUMENTED_EVIDENCE and fields.get("stop_match") is True:
+        warnings.append(f"stop_match=1 contradicts stop_evidence={evidence}")
 
     rename = {"profile_state": "state", "profile_armed": "armed", "last_profile_reject": "last_reject",
               "profile_source": "source"}
     kwargs = {rename.get(k, k): v for k, v in fields.items()}
     return ProfileReport(True, None, unknown=tuple(unknown), ignored=tuple(ignored),
-                         warnings=tuple(warnings), present=frozenset(values), text=shown, **kwargs)
+                         warnings=tuple(warnings), present=frozenset(values), text=shown,
+                         integrity_issues=tuple(issues), raw_integrity=tuple(raw_integrity), **kwargs)
 
 
 def args_set_profile(profile_id: int, profile_hash: bytes, codes) -> bytes:
@@ -298,14 +337,59 @@ def encode_profile_text(*, state="NONE", armed=False, profile_id=0, profile_hash
 EVENT_LIMIT = 500        # the RAW sidecar keeps 512 characters per event text
 
 
+ATTRIBUTION_BASES = ("owner", "foreign", "detached", "no_session")
+
+
+def profile_attribution(reply_session: int, *, sent_session: int = 0, phase: str = "",
+                        candidate_session: int | None = None, end_phases=("ended", "after_safe_off")) -> dict:
+    """Who a get-profile report belongs to. The report is device-wide and carries no session key, so only
+    the reply's session id can bind it to a run:
+
+    * owner      the request carried this host's live session id and the reply reports the same id. The
+                 firmware refuses a request whose session id is not the current one (INVALID_STATE), so
+                 this is the only case attributed to the run (attributed=True).
+    * foreign    the reply reports a session that is not this host's live one (another endpoint owns the
+                 device now): a device diagnostic, never this run's evidence.
+    * detached   session 0 after this host's session ended (end phases): the device has no owner now, but
+                 nothing on the wire shows that no other session ran in between. Unattributed; the run's
+                 session is kept only as `candidate_session`.
+    * no_session session 0 outside an end phase (connect, arm, pre-START, diagnostics).
+    """
+    reply_session = int(reply_session or 0)
+    if reply_session and sent_session and reply_session == sent_session:
+        return {"attributed": True, "basis": "owner", "reply_session": reply_session, "session": reply_session}
+    if reply_session:
+        return {"attributed": False, "basis": "foreign", "reply_session": reply_session}
+    if phase in end_phases and candidate_session:
+        return {"attributed": False, "basis": "detached", "reply_session": 0,
+                "candidate_session": int(candidate_session)}
+    return {"attributed": False, "basis": "no_session", "reply_session": 0}
+
+
 def profile_event_text(report: ProfileReport, *, phase: str, boot_id: int | None = None,
-                       session_id: int | None = None, plan_epoch: int | None = None) -> str:
-    """One compact sidecar line (<= EVENT_LIMIT characters). `phase` says when it was read. The hash fields are
-    written in full; code vectors go to `profile_codes_event_text`."""
+                       session_id: int | None = None, plan_epoch: int | None = None,
+                       provenance: dict | None = None, reply_state: str | None = None) -> str:
+    """One compact sidecar line (<= EVENT_LIMIT characters). `phase` says when it was read. With
+    `provenance` (from `profile_attribution`) the line says explicitly whether the report is attributed to
+    the run (`attributed=1 basis=owner session=N`) or not (`attributed=0 basis=foreign|detached|no_session`,
+    with `reply_session` and, for detached, `candidate_session`); `session=` is then written only when the
+    report is attributed. Without `provenance` the older form (`session=` as given) is kept. Identity and
+    integrity come first; the hash fields close the line; code vectors go to `profile_codes_event_text`."""
     head = [f"phase={phase}"]
+    if provenance is not None:
+        head.append(f"attributed={int(bool(provenance.get('attributed')))}")
+        head.append(f"basis={provenance.get('basis', 'no_session')}")
+        head.append(f"reply_session={int(provenance.get('reply_session') or 0)}")
+        if reply_state:
+            head.append(f"reply_state={reply_state}")
+        if provenance.get("candidate_session"):
+            head.append(f"candidate_session={provenance['candidate_session']}")
     if boot_id is not None:
         head.append(f"boot=0x{boot_id:X}")
-    if session_id:
+    if provenance is not None:
+        if provenance.get("attributed") and provenance.get("session"):
+            head.append(f"session={provenance['session']}")
+    elif session_id:
         head.append(f"session={session_id}")
     if plan_epoch is not None:
         head.append(f"plan_epoch={plan_epoch}")
@@ -320,24 +404,55 @@ def profile_event_text(report: ProfileReport, *, phase: str, boot_id: int | None
     def hexid(value):
         return "-" if value is None else f"0x{value:08X}"
 
+    def flag(value):
+        return "-" if value is None else str(int(value))
+
     parts = head + [
-        "supported=1", f"state={fmt(report.state)}", f"armed={fmt(None if report.armed is None else int(report.armed))}",
-        f"id={hexid(report.profile_id)}", f"hash={fmt(report.profile_hash, 'none')}",
-        f"source={fmt(report.source)}", f"start_result={fmt(report.start_result)}",
-        f"mismatch_slot={fmt(report.mismatch_slot)}", f"applied_id={hexid(report.applied_profile_id)}",
-        f"applied_hash={fmt(report.applied_profile_hash, 'none')}",
-        f"applied_valid={fmt(None if report.applied_valid is None else int(report.applied_valid))}",
+        "supported=1", f"state={fmt(report.state)}", f"armed={flag(report.armed)}",
+        f"id={hexid(report.profile_id)}", f"source={fmt(report.source)}",
+        f"start_result={fmt(report.start_result)}", f"mismatch_slot={fmt(report.mismatch_slot)}",
+        f"applied_id={hexid(report.applied_profile_id)}", f"applied_valid={flag(report.applied_valid)}",
         f"stop_evidence={fmt(report.stop_evidence)}",
-        f"stop_integrity={report.stop_integrity_effective}", f"stop_slot={fmt(report.stop_slot)}",
-        f"stop_error={fmt(report.stop_error)}"]
+        f"stop_integrity={report.stop_integrity_effective}", f"stop_match={flag(report.stop_match)}",
+        f"stop_slot={fmt(report.stop_slot)}", f"stop_error={fmt(report.stop_error)}"]
+    raw = _raw_integrity_text(report)
+    if report.integrity_issues:
+        parts.append("integrity_issues=" + ",".join(report.integrity_issues[:4]))
+        parts.append(raw)
     if report.integrity_blocked:
-        parts.insert(1, "DATA_INTEGRITY_BLOCKED")
+        parts.insert(len(head) + 1, "DATA_INTEGRITY_BLOCKED")
+    tail = []
     if report.unknown:
-        parts.append("unknown_keys=" + ",".join(k for k, _ in report.unknown[:6]))
+        tail.append("unknown_keys=" + ",".join(k for k, _ in report.unknown[:6]))
     if report.warnings:
-        parts.append(f"warnings={len(report.warnings)}")
-    text = " ".join(parts)
-    return text if len(text) <= EVENT_LIMIT else text[:EVENT_LIMIT - 1] + "…"
+        tail.append(f"warnings={len(report.warnings)}")
+    armed_hash = fmt(report.profile_hash, "none")
+    applied_hash = fmt(report.applied_profile_hash, "none")
+    text = " ".join(parts + [f"hash={armed_hash}", f"applied_hash={applied_hash}"] + tail)
+    if len(text) > EVENT_LIMIT and applied_hash == armed_hash != "none":
+        text = " ".join(parts + [f"hash={armed_hash}", "applied_hash=same"] + tail)
+    if len(text) > EVENT_LIMIT:
+        # never cut a hash: both go to their own `profile_ids` event (profile_ids_event_text)
+        text = " ".join(parts + ["hashes=in_profile_ids"] + tail)
+    if len(text) > EVENT_LIMIT and report.integrity_issues:
+        # the raw integrity values are kept too, in the same `profile_ids` event
+        parts[parts.index(raw)] = "raw_integrity=in_profile_ids"
+        text = " ".join(parts + ["hashes=in_profile_ids"] + tail)
+    return text if len(text) <= EVENT_LIMIT else text[:EVENT_LIMIT - 1] + "."
+
+
+def _raw_integrity_text(report: ProfileReport) -> str:
+    return "raw_integrity=" + ",".join(f"{k}:{v}" for k, v in report.raw_integrity[:8])
+
+
+def profile_ids_event_text(report: ProfileReport, *, phase: str) -> str:
+    """The armed and applied profile hashes in full (and, when the integrity fields were inconsistent, their
+    raw values), for a line that had no room for them."""
+    text = (f"phase={phase} hash={report.profile_hash or 'none'} "
+            f"applied_hash={report.applied_profile_hash or 'none'}")
+    if report.integrity_issues:
+        text += " " + _raw_integrity_text(report)
+    return text[:EVENT_LIMIT]
 
 
 def profile_codes_event_text(report: ProfileReport) -> str | None:
@@ -372,6 +487,9 @@ def profile_summary(report: ProfileReport | None, *, failure: str = "") -> str:
     lines.append(f"Last stop: evidence {report.stop_evidence or 'not reported'} · integrity "
                  f"{report.stop_integrity_effective}"
                  + (" · DATA INTEGRITY BLOCKED" if report.integrity_blocked else ""))
+    if report.integrity_issues:
+        lines.append("Integrity fields inconsistent (" + ", ".join(report.integrity_issues[:3])
+                     + "): treated as UNVERIFIED")
     if report.warnings:
         lines.append("Parse warnings: " + "; ".join(report.warnings[:3]))
     if report.unknown:
