@@ -328,12 +328,14 @@ class EngineeringRun:
 
     def _reset_run_context(self, why: str) -> None:
         """H-01a: forget the previous run's session id, its pending profile reads and any deferred SAFE_OFF
-        read before a new recording cycle, so nothing of that run is written into the new sidecar."""
+        read before a new recording cycle, so nothing of that run is written into the new sidecar. H-01b:
+        also the latest RAW frame, whose epoch is written as `plan_epoch` (START clears it again)."""
         if self._deferred_profile is not None:
             self._event(f"LED profile (after_safe_off): not read ({why} first)")
         self._deferred_profile = None
         self._session_id = None
         self._await_running = self._await_end = False
+        self.latest_raw = {}          # H-01b: the previous run's RAW epoch never labels the new recording
 
     def start(self) -> None:
         self._require_ready()
@@ -539,13 +541,18 @@ class EngineeringRun:
                     report, phase=phase, boot_id=boot, plan_epoch=epoch,
                     provenance=provenance or {"attributed": False, "basis": "no_session", "reply_session": 0},
                     reply_state=reply_state)
-                # H-02a: the follow-ons come from the same structured result, never from scanning the text
-                self.recorder.event(kind, lines.main)
-                for ids in lines.ids:
-                    self.recorder.event(kind + "_ids", ids)
+                # H-02a: the follow-ons come from the same structured result, never from scanning the text.
+                # H-02c: main line, every follow-on and the code vectors are stored as one group or not at
+                # all; a group that does not fit leaves one explicit `incomplete=1` event (no orphan
+                # `in_profile_ids` marker), or, without room even for that, an event drop.
+                group = [(kind, lines.main)] + [(kind + "_ids", ids) for ids in lines.ids]
                 codes = profile_codes_event_text(report)
                 if codes and not foreign:
-                    self.recorder.event("profile_codes", codes)
+                    group.append(("profile_codes", codes))
+                stored = self.recorder.event_group(group, incomplete=(kind, lambda needed, available: (
+                    f"phase={phase} incomplete=1 reason=event_limit needed={needed} available={available}")))
+                if not stored:
+                    self._event(f"LED profile ({phase}): sidecar event limit reached; report group not stored")
         return True
 
     def _deferred_follow(self) -> None:

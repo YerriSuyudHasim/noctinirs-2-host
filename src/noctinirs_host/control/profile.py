@@ -42,6 +42,12 @@ for investigation (a value longer than RAW_VALUE_LIMIT characters is shortened w
 Sidecar (H-02a): `profile_event_lines` builds the main event and its `*_ids` follow-on events as one
 structured result. The main line is shrunk by moving whole fields to the follow-ons (with an explicit
 `...=in_profile_ids` marker) and is never sliced; hashes and raw values are never cut mid-token.
+H-02b (reversible encoding): every raw integrity occurrence is its own space-separated token
+`raw_integrity=<key>:<value>` (key is an INTEGRITY_KEYS name, value is everything after the first ":", so
+commas, colons and "=" in a value survive; wire values never contain a space), and every integrity issue
+is its own `integrity_issues=<name>` token. A marker `raw_integrity=in_profile_ids` /
+`integrity_issues=in_profile_ids` (no ":" after a key name) only says where the tokens went.
+`raw_integrity_from_events` reads the occurrences back in order.
 """
 
 from __future__ import annotations
@@ -394,7 +400,8 @@ def _ids_lines(phase: str, groups: list) -> tuple:
     the prefix (e.g. `raw_integrity=`), or written as separate tokens when the prefix is None. An item is
     never split: it always fits a fresh line (hashes are 64 characters, issue names are short, raw values
     are bounded by RAW_VALUE_LIMIT). A group that continues on the next line repeats its prefix there, so
-    the readers concatenate the values of the same key in `ids` order."""
+    the readers concatenate the values of the same key in `ids` order. Values that may contain a comma
+    (raw integrity values, H-02b) are always passed as separate tokens (prefix None), never comma-joined."""
     budget = EVENT_LIMIT - len(f"phase={phase} ids=99/99 ")
     bodies: list = []
     current = ""
@@ -504,16 +511,18 @@ def profile_event_lines(report: ProfileReport, *, phase: str, boot_id: int | Non
         core.insert(1, ("blocked", "DATA_INTEGRITY_BLOCKED"))
     armed_hash = report.profile_hash or "none"
     applied_hash = report.applied_profile_hash or "none"
-    raw_items = [f"{k}:{v}" for k, v in report.raw_integrity]
     issues = list(report.integrity_issues)
+    # H-02b: one token per occurrence / issue, never comma-joined (a value may contain commas)
+    raw_tokens = [f"raw_integrity={k}:{v}" for k, v in report.raw_integrity]
+    issue_tokens = [f"integrity_issues={i}" for i in issues]
     unknown = [k for k, _ in report.unknown]
     warnings = [f"warnings={len(report.warnings)}"] if report.warnings else []
 
     def build(*, hashes: str, raw_out: bool, issues_out: bool, unknown_out: bool, moved=()) -> tuple:
         parts = head + [t for name, t in core if name not in moved]
         if issues:
-            parts.append("integrity_issues=" + ("in_profile_ids" if issues_out else ",".join(issues)))
-            parts.append("raw_integrity=" + ("in_profile_ids" if raw_out else ",".join(raw_items)))
+            parts += ["integrity_issues=in_profile_ids"] if issues_out else issue_tokens
+            parts += ["raw_integrity=in_profile_ids"] if raw_out else raw_tokens
         if hashes == "inline":
             parts += [f"hash={armed_hash}", f"applied_hash={applied_hash}"]
         elif hashes == "same":
@@ -533,9 +542,9 @@ def profile_event_lines(report: ProfileReport, *, phase: str, boot_id: int | Non
         if hashes == "out":
             groups.append((None, [f"hash={armed_hash}", f"applied_hash={applied_hash}"]))
         if issues_out:
-            groups.append(("integrity_issues=", issues))
+            groups.append((None, issue_tokens))
         if raw_out and issues:
-            groups.append(("raw_integrity=", raw_items))
+            groups.append((None, raw_tokens))
         if unknown_out and unknown:
             groups.append(("unknown_keys=", unknown))
         return " ".join(parts), (_ids_lines(phase, groups) if groups else ())
@@ -582,8 +591,8 @@ def profile_ids_event_lines(report: ProfileReport, *, phase: str) -> tuple:
     groups = [(None, [f"hash={report.profile_hash or 'none'}",
                       f"applied_hash={report.applied_profile_hash or 'none'}"])]
     if report.integrity_issues:
-        groups.append(("integrity_issues=", list(report.integrity_issues)))
-        groups.append(("raw_integrity=", [f"{k}:{v}" for k, v in report.raw_integrity]))
+        groups.append((None, [f"integrity_issues={i}" for i in report.integrity_issues]))
+        groups.append((None, [f"raw_integrity={k}:{v}" for k, v in report.raw_integrity]))
     return _ids_lines(phase, groups)
 
 
@@ -591,6 +600,23 @@ def profile_ids_event_text(report: ProfileReport, *, phase: str) -> str:
     """All of `profile_ids_event_lines` joined (for display and tests; may exceed EVENT_LIMIT). The recorder
     path writes the bounded events of `profile_event_lines` instead."""
     return " ".join(profile_ids_event_lines(report, phase=phase))
+
+
+def raw_integrity_from_events(texts) -> tuple:
+    """H-02b reader: the ((key, value), ...) raw integrity occurrences, in order, from a main line and its
+    `ids` follow-ons (pass them in sidecar order). Each `raw_integrity=<key>:<value>` token is one
+    occurrence; the value is everything after the first ":" (commas kept). The `in_profile_ids` marker is
+    skipped."""
+    out = []
+    for text in texts:
+        for token in text.split(" "):
+            name, eq, rest = token.partition("=")
+            if name != "raw_integrity" or not eq or rest == "in_profile_ids":
+                continue
+            key, colon, value = rest.partition(":")
+            if colon:
+                out.append((key, value))
+    return tuple(out)
 
 
 def profile_codes_event_text(report: ProfileReport) -> str | None:

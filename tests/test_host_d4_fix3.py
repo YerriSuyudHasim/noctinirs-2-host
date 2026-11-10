@@ -6,7 +6,6 @@ sources); no device, no firmware was run. H-08a is documentation only (no test).
 by the limit is sent (see HOST_D4_FIX3_REPORT.md).
 """
 
-import re
 import time
 
 import pytest
@@ -41,13 +40,15 @@ def raw_occurrences(text: bytes):
 
 
 def ids_values(ids, key):
-    """Every value of `key` over the `ids` events, in order (a comma list may continue on the next event)."""
+    """Every value of `key` over the given events, in order (FIX4: raw integrity values and issues are one
+    token each; the `in_profile_ids` marker is skipped)."""
     out = []
     for line in ids:
         for token in line.split(" "):
             k, _, v = token.partition("=")
             if k == key:
-                out.extend(v.split(",") if key in ("raw_integrity", "integrity_issues") else [v])
+                if v != "in_profile_ids":      # FIX4 (H-02b): one token per occurrence, never comma-joined
+                    out.append(v)
     return out
 
 
@@ -76,8 +77,7 @@ def test_h02a_the_codex_probe_keeps_markers_both_hashes_and_all_ten_raw_values()
     check_ids_complete(ev.ids, "after_safe_off")
     assert ids_values(ev.ids, "hash") == [H1] and ids_values(ev.ids, "applied_hash") == [H2]
     assert ids_values(ev.ids, "raw_integrity") == [f"{k}:{v}" for k, v in raw_occurrences(text)]
-    issues = set(re.search(r"integrity_issues=(\S+)", ev.main).group(1).split(",")) \
-        if "integrity_issues=in_profile_ids" not in ev.main else set(ids_values(ev.ids, "integrity_issues"))
+    issues = set(ids_values((ev.main,) + ev.ids, "integrity_issues"))
     assert {f"duplicate:{k}" for k in INTEGRITY_KEYS} <= issues
 
 

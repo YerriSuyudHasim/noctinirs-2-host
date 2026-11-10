@@ -187,9 +187,15 @@ def test_h02_a_duplicated_integrity_key_is_unverified_in_either_order(key, order
     assert f"duplicate:{key}" in r.integrity_issues
     assert any("duplicate integrity key" in w for w in r.warnings)
     assert [v for k, v in r.raw_integrity if k == key] == [first, second]      # the device's raw values are kept
-    text = profile_event_text(r, phase="ended", provenance=PR.profile_attribution(0))
+    ev = PR.profile_event_lines(r, phase="ended", provenance=PR.profile_attribution(0))
+    text = ev.main
     assert "stop_integrity=UNVERIFIED" in text and f"duplicate:{key}" in text
-    assert f"{key}:{first}" in text and f"{key}:{second}" in text and len(text) <= EVENT_LIMIT
+    # FIX4 (H-02b): one `raw_integrity=<key>:<value>` token per occurrence; the six tokens no longer fit the
+    # main line next to the identity, so they are read back from main + follow-ons, complete and in order
+    assert PR.raw_integrity_from_events((text,) + ev.ids) == r.raw_integrity
+    assert f"raw_integrity={key}:{first}" in " ".join((text,) + ev.ids)
+    assert f"raw_integrity={key}:{second}" in " ".join((text,) + ev.ids)
+    assert all(len(t) <= EVENT_LIMIT for t in (text,) + ev.ids)
     assert "inconsistent" in profile_summary(r)
 
 

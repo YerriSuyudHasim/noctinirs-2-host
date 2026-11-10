@@ -274,6 +274,33 @@ class Recorder:
                 kind, text = kind[:64], text[:512]
             self._events.append({"t_utc": _utc(self._wall()), "kind": kind, "text": text})
 
+    def event_group(self, events, *, incomplete=None) -> bool:
+        """H-02c: store `events` ((kind, text), ...) as one all-or-nothing group under the same lock and
+        RAW_EVENTS_LIMIT as `event`. When the whole group does not fit, nothing of it is stored and every
+        event of it counts as an event drop; instead `incomplete = (kind, make_text)` stores one marker event
+        `make_text(needed, available)` if one slot is left (otherwise that marker counts as a drop too).
+        True = the whole group was stored."""
+        events = list(events)
+        with self._lock:
+            limited = self._raw is not None
+            if limited and len(self._events) + len(events) > RAW_EVENTS_LIMIT:
+                available = max(0, RAW_EVENTS_LIMIT - len(self._events))
+                self._event_drops += len(events)
+                if incomplete is not None:
+                    if available >= 1:
+                        kind, make_text = incomplete
+                        self._events.append({"t_utc": _utc(self._wall()), "kind": kind[:64],
+                                             "text": make_text(len(events), available)[:512]})
+                    else:
+                        self._event_drops += 1
+                return False
+            stamp = _utc(self._wall())
+            for kind, text in events:
+                if limited:
+                    kind, text = kind[:64], text[:512]
+                self._events.append({"t_utc": stamp, "kind": kind, "text": text})
+            return True
+
     def on_controller_event(self, ev) -> None:  # SessionController listener
         self.event(ev.kind, ev.text)
 
