@@ -7,6 +7,7 @@ import time
 
 import pytest
 
+from calibration_fixture import CalibrationPeer, CalibrationReadyRun, seed_calibration
 from helpers import build_envelope, build_raw
 from noctinirs_host.control import protocol as p
 from noctinirs_host.control.session import SessionController
@@ -14,7 +15,7 @@ from noctinirs_host.engineering import EngineeringRun, RecordingTarget
 from noctinirs_host.geometry import load_geometry
 from noctinirs_host.record.raw_archive import RawReplay
 from noctinirs_host.record.writer import Recorder
-from test_udp_session import Clock, Peer
+from test_udp_session import Clock
 
 GEOMETRY = Path(__file__).resolve().parents[1] / "config" / "optical_geometry_v1.json"
 
@@ -31,12 +32,12 @@ def poll(run, condition, timeout=4):
 
 @pytest.fixture
 def setup():
-    peer, clock = Peer(), Clock()
+    peer, clock = CalibrationPeer(), Clock()
     peer.capability += ";frames=RAW_ENGINEERING;raw_packets_sent=0;raw_dropped_samples=0"
     runs = []
 
     def make(**kwargs):
-        run = EngineeringRun(load_geometry(GEOMETRY), "b" * 40, **kwargs,
+        run = CalibrationReadyRun(load_geometry(GEOMETRY), "b" * 40, **kwargs,
                              controller_factory=lambda transport: SessionController(
                                  transport, clock, retries=1, timeout_s=.05))
         runs.append(run)
@@ -82,6 +83,7 @@ def test_udp_workflow_archives_wire_and_provenance(setup, tmp_path):
     run.tick()
     assert run.snapshot()["device_state"] == "STREAMING"
     assert peer.requests[-1][1].opcode == p.OP_HEARTBEAT
+    run.tick()  # verify APPLIED on the same owner session
     expected = [
         build_envelope(build_raw(first=10), session_id=peer.session, flags=2, ts=250),
         build_envelope(build_raw(first=13), session_id=peer.session, flags=2, ts=400),
@@ -201,6 +203,9 @@ def test_writer_error_keeps_acquisition_control_and_reports_incomplete(setup, tm
     poll(run, lambda: run.recorder_state == "ARMED")
     run.start()
     peer.complete_start()
+    clock.now += .5
+    run.tick()
+    run.tick()
     peer.sock.sendto(build_envelope(build_raw(), session_id=peer.session), peer.owner)
     try:
         poll(run, writing.is_set)
@@ -277,6 +282,7 @@ def test_builtin_fake_is_simulated_and_produces_raw():
     try:
         run.connect(True, "", "")
         run.configure(10)
+        seed_calibration(run)
         run.start()
         poll(run, lambda: run.snapshot()["raw"]["packets"] > 0)
         assert run.snapshot()["simulated"] and run.snapshot()["latest"]["simulated"]

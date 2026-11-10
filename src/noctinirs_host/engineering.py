@@ -17,8 +17,8 @@ from .calibration_sweep import Sweep, SweepPlan, canonical, evidence
 from .control.engineering_fake import EngineeringFake
 from .control.pairing import ADDRESS, PORT, WindowsWifi, candidates, confirm_device
 from .control.profile import profile_attribution, profile_codes_event_text, profile_event_lines, profile_summary
-from .control.protocol import ST_SAFE_OFF, ST_STARTING, ST_STOPPED, ST_STOPPING, ST_STREAMING
-from .control.session import PROFILE_TIMEOUT_S, LoopbackTransport, SessionController
+from .control.protocol import STATUS_PRECONDITION_FAILED, ST_FAULTED, ST_SAFE_OFF, ST_STARTING, ST_STOPPED, ST_STOPPING, ST_STREAMING
+from .control.session import PROFILE_TIMEOUT_S, START_QUIET_S, LoopbackTransport, SessionController
 from .control.udp import UDPTransport
 from .geometry import Geometry
 from .preview.params import PreviewConfig
@@ -133,7 +133,7 @@ class EngineeringRun:
         self._paired = None
         self._reconnect_at = None
         self._reconnect_tries = 0
-        self.fake_options = {"profile_model": True, "require_profile": True, **(fake_options or {})}
+        self.fake_options = {"profile_model": True, "stage2_model": True, **(fake_options or {})}
         self.calibration_params = calibration_params or Assumptions()
         self.sweep_plan = sweep_plan or SweepPlan()
         self.sweep = None
@@ -142,6 +142,8 @@ class EngineeringRun:
         self._recording_calibration = None
         self._recording_apply_verified = False
         self._recording_running_evidence = None
+        self._pre_apply_raw = []
+        self._pre_apply_overflow = False
         self.preview_config = PreviewConfig()
         self.preview: PreviewPipeline | None = None
         self.preview_active = False
@@ -262,6 +264,8 @@ class EngineeringRun:
             transport = self._udp_factory(address, int(port))
             endpoint = f"UDP {transport.endpoint[0]}:{transport.endpoint[1]}"
         self.calibration = self.calibration_armed = None
+        self._recording_calibration = None
+        self._pre_apply_raw.clear()
         self.endpoint = endpoint
         self.configured = False
         self.raw = RawContinuity()
@@ -338,8 +342,30 @@ class EngineeringRun:
             raise ValueError("Calibration profile reply is missing, malformed or from a different boot.")
         return report, reply
 
-    @staticmethod
-    def _legacy_defaults(report):
+    def _stage2(self):
+        info = self.controller.info
+        minor, api = info.get("wire_minor"), info.get("profile_api")
+        if (minor, api) == ("2", "IREF2"):
+            return True
+        if minor not in (None, "1", "0") or api not in (None, "IREF1"):
+            raise ValueError("The device advertises an unsupported calibration wire revision.")
+        return False
+
+    def _read_defaults(self, report):
+        if self._stage2():
+            result = self.controller.query_default_table()
+            self._result(result)
+            reply = result.reply
+            table = reply.default_table
+            slots = tuple(slot for slot in range(20) if any(
+                ch is not None and ch.kind == "short"
+                for ch in (self.geometry.channel_for(slot, i) for i in range(4))))
+            if (table is None or table.short_slots != slots or reply.session_id
+                    or reply.state != ST_STOPPED or reply.boot_id != self.controller.boot_id):
+                raise ValueError("Stage 2 default-table readback is unusable or disagrees with the slot map.")
+            return dict(source=table.source, codes=table.codes, short_status=table.short_status,
+                        id=table.id, hash=table.hash, short_slots=table.short_slots,
+                        contract="S2-1.0")
         codes = report.default_code
         if not codes or any(not 1 <= code <= 133 for code in codes):
             raise ValueError("Firmware returned an invalid fallback table.")
@@ -350,7 +376,8 @@ class EngineeringRun:
         self._result(self.controller.set_profile(profile.profile_id, bytes.fromhex(profile.profile_hash),
                                                   profile.codes))
         report, reply = self._calibration_readback()
-        if not profile.matches(report) or reply.session_id or reply.state != ST_STOPPED:
+        if (not profile.matches(report) or reply.session_id or reply.state != ST_STOPPED
+                or (self._stage2() and report.start_gate != "OPEN")):
             raise ValueError("The device did not read back the armed profile exactly.")
         return evidence(report, reply)
 
@@ -362,7 +389,7 @@ class EngineeringRun:
         context = self._observe(verify_config=True, profile_phase=None)
         self._require_ready()
         report, _ = self._calibration_readback()
-        defaults = self._legacy_defaults(report)
+        defaults = self._read_defaults(report)
         self.sweep = Sweep(self, context["config"], defaults)
         self._note("Calibration started. Start opens after the sweep and profile readback.")
 
@@ -454,9 +481,19 @@ class EngineeringRun:
         calibration = context["calibration"]
         path = recorder.folder / f"{recorder.stem}.iref-v1.json"
         path.parent.mkdir(parents=True, exist_ok=True)
+        payload = canonical(calibration["profile"])
         with path.open("xb") as file:
-            file.write(canonical(calibration["profile"]))
-        recorder.start(raw_context=context)
+            try:
+                file.write(payload)
+            except OSError:
+                file.close()
+                path.unlink(missing_ok=True)
+                raise
+        try:
+            recorder.start(raw_context=context)
+        except (ValueError, OSError):
+            path.unlink(missing_ok=True)
+            raise
 
     def _reset_run_context(self, why: str) -> None:
         """H-01a: forget the previous run's session id, its pending profile reads and any deferred SAFE_OFF
@@ -468,6 +505,8 @@ class EngineeringRun:
         self._session_id = None
         self._recording_calibration = None
         self._recording_running_evidence = None
+        self._pre_apply_raw = []
+        self._pre_apply_overflow = False
         self._await_running = self._await_end = False
         self.latest_raw = {}          # H-01b: the previous run's RAW epoch never labels the new recording
 
@@ -485,22 +524,32 @@ class EngineeringRun:
         self.calibration = self.calibration_armed = None  # consume before attempting START
         report, reply = self._calibration_readback()
         if (profile.document["boot_id"] != reply.boot_id or profile.document["configuration"] != context["config"]
-                or not profile.matches(report) or self._legacy_defaults(report) != profile.document["default_table"]
+                or not profile.matches(report) or self._read_defaults(report) != profile.document["default_table"]
                 or reply.session_id or reply.state != ST_STOPPED):
             raise ValueError("Calibration settings or profile changed. Run a new sweep.")
         self._recording_calibration = profile
+        self._clip_reported = False
         self._recording_apply_verified = False
         self._recording_running_evidence = None
+        self._pre_apply_raw = []
+        self._pre_apply_overflow = False
         self.raw = RawContinuity()
         self.latest_raw = {}
         self._end_preview("new START")
         self.preview_epoch += 1
         self._preview_gap_sent = False
         self.preview = PreviewPipeline(self.geometry, self.preview_config,
-                                       self.controller.settings.fs_hz or 10)
+                                       self.controller.settings.fs_hz or 10,
+                                       calibration_headroom=self.calibration_params.headroom)
         self._session_id = None                 # a previous run's session never labels this one
         self._await_running = self._await_end = False
+        if self._stage2():
+            self._arm_calibration_profile(profile)  # S2-1.0 requires SET_PROFILE immediately before each START.
         result = self.controller.start()
+        if result.reply and result.reply.status == STATUS_PRECONDITION_FAILED and self._stage2():
+            report, _ = self._calibration_readback()
+            if report.start_gate in ("NO_PROFILE", "PROFILE_CONSUMED"):
+                raise ValueError("Firmware rejected Start because the profile was missing or consumed. Run a new sweep.")
         if self.controller.start_uncertain:
             self.configured = False
             message = f"START outcome unresolved ({result.status}). Lease-refresh traffic suspended."
@@ -616,6 +665,16 @@ class EngineeringRun:
         now = time.monotonic()
         self._deferred_profile = {"due": now + SAFE_OFF_PROFILE_DELAY_S, "limit": now + SAFE_OFF_PROFILE_LIMIT_S,
                                   "candidate": candidate}
+
+    def clear_fault(self):
+        if not self.connected or self.controller.device_state not in (ST_FAULTED, ST_SAFE_OFF):
+            raise ValueError("Recovery requires a connected device reporting FAULTED or SAFE_OFF.")
+        if self.recorder is not None or self._deferred_profile or self._closing is not None:
+            raise ValueError("Wait for recording cleanup before clearing the fault.")
+        self.sweep = self.calibration = self.calibration_armed = None
+        self.configured = False
+        self._check_mutation(self.controller.clear_fault())
+        self._note("Fault cleared. Apply configuration and run a fresh calibration.")
 
     def stop(self) -> None:
         ctl = self.controller
@@ -740,12 +799,19 @@ class EngineeringRun:
                     if profile is not None:
                         view = self.profile_view
                         self._recording_apply_verified = bool((view.get("provenance") or {}).get("attributed")
-                            and profile.matches(view["report"], applied=True))
-                        if self._recording_apply_verified:
+                            and view["reply_state"] == "STREAMING"
+                            and profile.matches(view["report"], applied=True)
+                            and profile.table_matches(view["report"], profile.document["default_table"]))
+                        if self._recording_apply_verified and not self._pre_apply_overflow:
                             self._recording_running_evidence = dict(boot_id=view["boot_id"],
                                 session_id=self._session_id, generation=None, report=view["report"].text)
                             self.preview_active = True
+                            frames, self._pre_apply_raw = self._pre_apply_raw, []
+                            for frame in frames:
+                                self._capture(*frame)
                         else:
+                            self._recording_apply_verified = False
+                            self._pre_apply_raw.clear()
                             self.fail("Applied profile readback failed. Stopping acquisition. Run a new sweep.")
                             try:
                                 self.stop()
@@ -769,10 +835,12 @@ class EngineeringRun:
             view = self.profile_view or {}
             report = view.get("report") if view.get("phase") in ("ended", "after_safe_off") else None
             stop = dict(report=report.text, boot_id=view.get("boot_id"),
-                        provenance=view.get("provenance"), generation=None) if report else None
+                        provenance=view.get("provenance"), generation=None,
+                        reported_integrity=report.stop_integrity_effective) if report else None
             context = {**(context or {}), "calibration_end": {
                 "running": self._recording_running_evidence, "stop_observation": stop,
-                "generation_verified": False}}
+                "generation_verified": False,
+                "headroom_exceeded": self._clip_reported, "pre_apply_overflow": self._pre_apply_overflow}}
         self.recorder_state = "FINALIZING"
         self._end_preview("recording finalized")
         provenance = self.preview.provenance() if self.preview is not None else None
@@ -821,6 +889,12 @@ class EngineeringRun:
             return
         try:
             self._preview_out.extend(self.preview.feed(raw, host_us, msg_sequence))
+            if self._recording_calibration is not None and self.preview.headroom_exceeded and not self._clip_reported:
+                self._clip_reported = True
+                warning = "Calibration headroom exceeded. Check room light and probe fit, then Stop and run a new sweep."
+                self._note(warning)
+                if self.recorder is not None and self.recorder_state == "RECORDING":
+                    self.recorder.event("calibration_integrity", "CLIP_DETECTED: affected occurrence invalid. " + warning)
         except Exception:  # preview faults must not disturb capture or recording
             self.preview_errors += 1
 
@@ -851,6 +925,10 @@ class EngineeringRun:
             self.sweep.feed(raw, wire, host_us)
             return
         if self._recording_calibration is not None and not self._recording_apply_verified:
+            if len(self._pre_apply_raw) < 512:
+                self._pre_apply_raw.append((wire, host_us, boot_id))
+            else:
+                self._pre_apply_overflow = True
             return
         if self.recorder_state in ("ARMED", "RECORDING"):
             self.recorder.feed_raw(wire, host_us, boot_id)
@@ -904,7 +982,7 @@ class EngineeringRun:
         self.fail(message)
         self._close_link(message, ctl.recording_snapshot() if ctl else None)
         if self._paired and not self._closing and not (ctl and ctl.start_uncertain):
-            self._reconnect_at = time.monotonic() + 2
+            self._reconnect_at = time.monotonic() + START_QUIET_S + .5
             self._reconnect_tries = 0
 
     def _reconnect(self):
@@ -1003,7 +1081,8 @@ class EngineeringRun:
                 if result is not None:
                     self.calibration, self.calibration_armed = result
                     self.sweep = None
-                    self._note("Calibration verified. Ready for one Start. Stage 2 table readback unavailable.")
+                    suffix = "" if self._stage2() else " FIX6 has no Stage 2 table readback."
+                    self._note("Calibration verified. Ready for one Start." + suffix)
             except (ValueError, OSError) as exc:
                 try:
                     self.cancel_calibration()

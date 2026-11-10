@@ -11,8 +11,10 @@ import struct
 
 from ..wire.envelope import FLAG_SIMULATED, FLAG_TS_ESTIMATED
 from ..wire.optical import ADC_SOURCE_ADS131, LAYOUT_RAW, PH_OUTSIDE, RAW_SLOT_NONE
+from .default_table import SHORT_SLOTS, SHORT_STATES
 from .profile import IREF_CODE_MAX, IREF_CODE_MIN, IREF_SLOTS, PROFILE_ARG_BYTES, encode_profile_text
-from .protocol import (OP_CLEAR_PROFILE, OP_GET_PROFILE, OP_INFO, OP_SET_PROFILE, OP_START, STATUS_INVALID_ARG,
+from .protocol import (OP_CLEAR_PROFILE, OP_GET_DEFAULT_TABLE, OP_GET_PROFILE, OP_INFO,
+                       OP_SET_DEFAULT_TABLE, OP_SET_PROFILE, OP_START, STATUS_INVALID_ARG, STATUS_PRECONDITION_FAILED,
                        STATUS_INVALID_STATE, STATUS_OK, ST_FAULTED, ST_STARTING, ST_STOPPED, ST_STREAMING,
                        encode_frame)
 from .simulator import DeviceSimulator, FS_MIN, FS_MAX
@@ -37,7 +39,8 @@ class EngineeringFake(DeviceSimulator):
     and a START whose outcome is ``start_outcome`` ("ok", "profile_not_applied", "start_failed" or
     "start_cancelled"; the three failures follow the START ACK, as on the device). ``stop_evidence`` is the
     evidence class reported after a host STOP. Without ``profile_model`` the fake behaves like firmware
-    that does not know the commands.
+    that does not know the commands. With profile_model and stage2_model enabled, the fake
+    implements the S2-1.0 single-use gate and in-memory default-table report.
     """
 
     dead_slots: frozenset = frozenset()
@@ -50,7 +53,7 @@ class EngineeringFake(DeviceSimulator):
         opts = {k: kwargs.pop(k) for k in ("dead_slots", "saturate", "drop_cycles", "leak",
                                            "info_extra", "battery_mode", "battery",
                                            "battery_age_override_ms", "profile_model", "start_outcome",
-                                           "stop_evidence", "require_profile") if k in kwargs}
+                                           "stop_evidence", "stage2_model") if k in kwargs}
         super().__init__(*args, **kwargs)
         self.geometry = kwargs.get('geometry')
         for k, v in opts.items():
@@ -64,9 +67,13 @@ class EngineeringFake(DeviceSimulator):
         self._applied: dict | None = None
         self._fail_at: float | None = None
         self.profile_requests = 0
+        self._fresh_profile = False
+        self._arm_epoch = 0
+        self._table = (0, None, (133,) * IREF_SLOTS, "UNSET")
+        self._table_reject = ("NONE", -1)
 
     profile_model = False
-    require_profile = False
+    stage2_model = False
     start_outcome = "ok"
     stop_evidence = "VALID_MATCH"
 
@@ -79,6 +86,8 @@ class EngineeringFake(DeviceSimulator):
                 info += self._profile_info_tokens()
             return self._reply(req.req_id, op, STATUS_OK, info.encode('ascii')), False
         if self.profile_model:
+            if self.stage2_model and op in (OP_GET_DEFAULT_TABLE, OP_SET_DEFAULT_TABLE):
+                return self._execute_default_table(req.req_id, op, args)
             handled = self._execute_profile(req, op, args)
             if handled is not None:
                 return handled
@@ -90,27 +99,36 @@ class EngineeringFake(DeviceSimulator):
 
     def _profile_info_tokens(self) -> str:
         a = self._applied or {}
+        api = (";wire_minor=2;profile_api=IREF2;start_gate=" + self._gate()
+               if self.stage2_model else ";wire_minor=1;profile_api=IREF1")
         return (";legacy_current=RECORDED_ONLY;iref_code_default=133;iref_code_max=222;iref_ua_per_lsb=225"
-                f";wire_minor=1;profile_api=IREF1;profile_state={self._profile_state()}"
+                f"{api};profile_state={self._profile_state()}"
                 f";profile_source={a.get('source', 'NONE')};applied_profile_id=0x{a.get('id', 0):08X}"
                 f";applied_valid={int(bool(a.get('valid')))};start_result={a.get('start_result', 'NONE')}")
+
+    def _gate(self):
+        return ("NO_PROFILE" if not self._profile else "OPEN" if self._fresh_profile else "PROFILE_CONSUMED")
 
     def _profile_state(self) -> str:
         a = self._applied or {}
         if not self._profile:
             return "NONE"
-        if a.get("source") == "PROFILE" and a.get("id") == self._profile[0]:
+        if self.stage2_model and self._fresh_profile:
+            return "ARMED"
+        if a.get("source") == "PROFILE" and a.get("epoch") == self._arm_epoch:
             if a.get("valid"):
                 return "APPLIED"
             if a.get("start_result") == "PROFILE_NOT_APPLIED":
                 return "NOT_APPLIED"
-        return "ARMED"
+        return "CONSUMED" if self.stage2_model else "ARMED"
 
     def _profile_fields(self) -> dict:
         a = self._applied or {}
         armed = self._profile is not None
         codes = a.get("codes")
         return dict(
+            start_gate=self._gate() if self.stage2_model else None,
+            session_table_id=a.get("table_id", 0), session_short_status=a.get("short_status", "NONE"),
             state=self._profile_state(), armed=armed, profile_id=self._profile[0] if armed else 0,
             profile_hash=self._profile[1] if armed else None, profile_code=self._profile[2] if armed else None,
             source=a.get("source", "NONE"), start_result=a.get("start_result", "NONE"),
@@ -135,6 +153,8 @@ class EngineeringFake(DeviceSimulator):
                 return self._reply(rid, op, STATUS_INVALID_ARG), True     # never clamped
             if self.state != ST_STOPPED:
                 return self._reply(rid, op, STATUS_INVALID_STATE), True
+            self._arm_epoch += 1
+            self._fresh_profile = True
             self._profile = (ident, bytes(args[4:36]), tuple(codes))
             return self._reply(rid, op, STATUS_OK), True
         if op == OP_CLEAR_PROFILE:
@@ -142,16 +162,20 @@ class EngineeringFake(DeviceSimulator):
                 return self._reply(rid, op, STATUS_INVALID_ARG), True
             if self.state != ST_STOPPED:
                 return self._reply(rid, op, STATUS_INVALID_STATE), True
+            self._arm_epoch += 1
+            self._fresh_profile = False
             self._profile = None
             return self._reply(rid, op, STATUS_OK), True
         if op == OP_START and not args and self.state == ST_STOPPED:
-            if self.require_profile and not self._profile:
-                return self._reply(rid, op, STATUS_INVALID_STATE), True
+            if self.stage2_model and self._gate() != "OPEN":
+                return self._reply(rid, op, STATUS_PRECONDITION_FAILED), True
+            self._fresh_profile = False
             codes = self._armed_codes()
             source = "PROFILE" if self._profile else "DEFAULT"
             self._applied = dict(source=source, id=self._profile[0] if self._profile else 0,
                                  hash=self._profile[1] if self._profile else None, codes=codes,
-                                 start_result="NONE", applied=None, valid=False, stop_evidence="NONE")
+                                 start_result="NONE", applied=None, valid=False, stop_evidence="NONE",
+                                 epoch=self._arm_epoch, table_id=self._table[0], short_status=self._table[3])
             if self.start_outcome == "ok":
                 self._applied.update(start_result="OK", applied=codes, valid=True)
                 return None                                   # the normal START path of the base model
@@ -163,6 +187,43 @@ class EngineeringFake(DeviceSimulator):
             self._fail_at = now + 0.3
             return self._reply(rid, op, STATUS_OK), True
         return None
+
+    def _execute_default_table(self, rid, op, args):
+        if op == OP_GET_DEFAULT_TABLE:
+            if args:
+                return self._reply(rid, op, STATUS_INVALID_ARG), False
+            ident, digest, codes, status = self._table
+            reject, slot = self._table_reject
+            text = (f"v4deftable=1 table_source={'RAM' if ident else 'BUILD'} "
+                    f"default_table_id=0x{ident:08X} default_table_hash={digest or 'none'} "
+                    f"short_status={status} short_slots=0,1,10,11 last_table_reject={reject} "
+                    f"reject_slot={slot} default_code=" + ",".join(map(str, codes)))
+            return self._reply(rid, op, STATUS_OK, text.encode("ascii")), False
+        if self.state != ST_STOPPED:
+            return self._reply(rid, op, STATUS_INVALID_STATE), True
+        reason, slot = "NONE", -1
+        if len(args) != 57:
+            reason = "LENGTH"
+        elif not (ident := int.from_bytes(args[:4], "little")):
+            reason = "ID_ZERO"
+        elif args[56] >= len(SHORT_STATES):
+            reason = "STATUS_INVALID"
+        else:
+            codes, status = tuple(args[36:56]), SHORT_STATES[args[56]]
+            for name, indices in (
+                ("CODE_ZERO", [i for i, code in enumerate(codes) if code == 0]),
+                ("CODE_ABOVE_DEFAULT", [i for i, code in enumerate(codes) if code > 133]),
+                ("UNSET_NOT_DEFAULT", [i for i, code in enumerate(codes) if status == "UNSET" and code != 133]),
+                ("SHORT_NOT_BELOW_DEFAULT", [i for i in SHORT_SLOTS if status != "UNSET" and codes[i] == 133]),
+            ):
+                if indices:
+                    reason, slot = name, indices[0]
+                    break
+        self._table_reject = reason, slot
+        if reason != "NONE":
+            return self._reply(rid, op, STATUS_INVALID_ARG), True
+        self._table = (ident, args[4:36].hex(), codes, status)
+        return self._reply(rid, op, STATUS_OK), True
 
     def poll(self) -> None:
         if self._fail_at is not None and self._clock() >= self._fail_at:

@@ -12,6 +12,7 @@ import time
 
 import pytest
 
+from calibration_fixture import seed_calibration
 from noctinirs_host.control import protocol as P
 from noctinirs_host.control.engineering_fake import EngineeringFake
 from noctinirs_host.control import profile as PR      # module access: new names fail per test on 1565124
@@ -100,6 +101,7 @@ def test_h01_the_next_runs_pre_start_read_never_carries_the_previous_session_id(
     rig.go(lambda: run.profile_view and run.profile_view["phase"] == "running")
     run.stop()
     rig.go(lambda: run.recorder_state == "FINALIZED" and run.recorder is None, seconds=15)
+    seed_calibration(run)
     run.start_recorded(str(tmp_path), "")
     rig.go(lambda: run.recorder_state == "RECORDING" and run.profile_view["phase"] == "running", seconds=15)
     run.stop()

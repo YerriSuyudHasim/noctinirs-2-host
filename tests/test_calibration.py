@@ -7,7 +7,10 @@ import pytest
 
 from noctinirs_host.calibration import Assumptions, DetectorModel, Level, empirical_choice, model_choice, x_min
 from noctinirs_host.calibration_sweep import SweepPlan
+from noctinirs_host.control import protocol as p
+from noctinirs_host.control.default_table import SHORT_SLOTS
 from noctinirs_host.control.session import SessionController
+from noctinirs_host.preview.filters import FilterConfig
 from noctinirs_host.engineering import EngineeringRun
 from noctinirs_host.geometry import load_geometry
 from test_engineering_run import GEOMETRY, poll
@@ -61,8 +64,9 @@ def complete_sweep(run, clock):
     assert run.calibration, run.error
 
 
-def test_fake_calibration_is_consumed_and_archived(tmp_path):
-    run, clock = run_fake()
+@pytest.mark.parametrize("stage2_model", [False, True])
+def test_fake_calibration_is_consumed_and_archived(tmp_path, stage2_model):
+    run, clock = run_fake(stage2_model=stage2_model)
     try:
         with pytest.raises(ValueError, match="fresh calibration"):
             run.start()
@@ -74,6 +78,7 @@ def test_fake_calibration_is_consumed_and_archived(tmp_path):
             clock.now += .05
             run.tick()
         assert run._recording_apply_verified, run.error
+        run.set_preview_config(replace(run.preview_config, filters=FilterConfig(lowpass=True, channels=("CH1",))))
         run.stop()
         poll(run, lambda: run.recorder_state == "FINALIZED")
         with pytest.raises(ValueError, match="fresh calibration"):
@@ -81,6 +86,9 @@ def test_fake_calibration_is_consumed_and_archived(tmp_path):
         sidecar = json.loads((tmp_path / "record_1.json").read_text(encoding="utf8"))
         assert sidecar["raw"]["context_at_start"]["calibration"]["profile_id"] == profile.profile_id
         assert sha256((tmp_path / "record_1.iref-v1.json").read_bytes()).hexdigest() == profile.profile_hash
+        assert sum(e["kind"] == "preview_filter" for e in sidecar["events"]) == 1
+        defaults = profile.document["default_table"]
+        assert defaults["source"] == ("BUILD" if stage2_model else "legacy_get_profile")
     finally:
         run.shutdown()
         poll(run, lambda: run.finished)
@@ -95,6 +103,45 @@ def test_calibration_rejects_start_ack_without_matching_application():
             run.tick()
         assert run.sweep is None and run.calibration is None
         assert "before profile application" in run.error
+    finally:
+        run.shutdown()
+        poll(run, lambda: run.finished)
+
+
+def test_stage2_table_and_start_freshness():
+    run, clock = run_fake()
+    ctl = run.controller
+    try:
+        assert ctl.start().reply.status == p.STATUS_PRECONDITION_FAILED
+        assert ctl.query_profile().reply.profile.start_gate == "NO_PROFILE"
+        assert ctl.query_default_table().reply.default_table.source == "BUILD"
+        codes = tuple(20 if slot in SHORT_SLOTS else 133 for slot in range(20))
+        with pytest.raises(ValueError, match="strict"):
+            ctl.set_default_table(7, b"x" * 32, (133,) * 20, "PROVISIONAL", SHORT_SLOTS)
+        assert ctl.set_default_table(7, b"x" * 32, codes, "PROVISIONAL", SHORT_SLOTS).ok
+        table = ctl.query_default_table().reply.default_table
+        assert (table.source, table.id, table.hash, table.short_status, table.codes) == (
+            "RAM", 7, (b"x" * 32).hex(), "PROVISIONAL", codes)
+        assert ctl.set_profile(5, b"y" * 32, codes).ok
+        assert ctl.start().ok
+        clock.now += .01
+        assert ctl.query_profile().reply.profile.session_table_id == 7
+        assert ctl.stop().ok
+        assert ctl.query_profile().reply.profile.state == "CONSUMED"
+        assert ctl.start().reply.status == p.STATUS_PRECONDITION_FAILED
+    finally:
+        run.shutdown()
+        poll(run, lambda: run.finished)
+
+
+def test_preflight_rejects_changed_profile_and_requires_another_sweep():
+    run, clock = run_fake()
+    try:
+        complete_sweep(run, clock)
+        assert run.controller.set_profile(42, b"x" * 32, (1,) * 20).ok
+        with pytest.raises(ValueError, match="profile changed"):
+            run.start()
+        assert run.stopped and run.calibration is None
     finally:
         run.shutdown()
         poll(run, lambda: run.finished)

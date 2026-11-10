@@ -10,6 +10,7 @@ import time
 
 import pytest
 
+from calibration_fixture import seed_calibration
 from noctinirs_host.control import profile as PR      # module access: new names fail per test on 7800319
 from noctinirs_host.control import protocol as P
 from noctinirs_host.control.engineering_fake import EngineeringFake
@@ -82,10 +83,12 @@ def test_h02a_the_codex_probe_keeps_markers_both_hashes_and_all_ten_raw_values()
 
 
 class CodexProbeFake(EngineeringFake):
-    """Every get-profile is answered with the Codex probe reply (1173 B, five duplicated keys, two hashes)."""
+    """Opt-in malformed report injection after a valid recording preflight."""
+
+    bad_profile = False
 
     def _execute_profile(self, req, op, args):
-        if op == P.OP_GET_PROFILE and not args:
+        if self.bad_profile and op == P.OP_GET_PROFILE and not args:
             self.profile_requests += 1
             return self._reply(req.req_id, op, P.STATUS_OK, codex_probe_reply()), False
         return super()._execute_profile(req, op, args)
@@ -97,13 +100,17 @@ def test_h02a_the_recorder_path_always_writes_the_follow_on_events_with_both_has
     rig = start_recorded(tmp_path)
     run = rig.run
     rig.go(lambda: run.profile_view and run.profile_view["phase"] == "running")
+    run.controller._t.simulator.bad_profile = True
+    run.controller._last_hb = run.controller._clock()
+    assert run._profile_query("running_probe")
     run.stop()
     rig.go(lambda: run.recorder_state == "FINALIZED", seconds=15)
     events = rig.sidecar()["events"]
     expected_raw = [f"{k}:{v}" for k, v in raw_occurrences(codex_probe_reply())]
-    mains = [(i, e["text"]) for i, e in enumerate(events) if e["kind"] == "profile"]
+    mains = [(i, e["text"]) for i, e in enumerate(events) if e["kind"] == "profile"
+             and e["text"].startswith(("phase=running_probe ", "phase=ended "))]
     phases = [t.split(" ")[0] for _, t in mains]
-    assert "phase=running" in phases and "phase=ended" in phases
+    assert "phase=running_probe" in phases and "phase=ended" in phases
     for i, main in mains:
         phase = main.split(" ")[0].partition("=")[2]
         assert len(main) <= EVENT_LIMIT and not main.endswith(".") and "stop_integrity=UNVERIFIED" in main
@@ -194,6 +201,7 @@ def test_h01a_safe_off_on_a_new_unstarted_recording_never_names_the_previous_run
     assert target.name == "record_2"
     run.check_destination(target)
     rig.go(lambda: run.checked_target == target and run._job is None)
+    seed_calibration(run)
     run.arm(target)
     assert run._session_id is None                    # the run context is reset when a new recording is armed
     rig.go(lambda: run.recorder_state == "ARMED" and run._job is None)

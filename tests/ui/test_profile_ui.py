@@ -46,7 +46,7 @@ def close(w):
 
 
 @pytest.mark.parametrize("fake,expected", [
-    ({}, "not available"),                                                 # firmware without get-profile
+    ({"profile_model": False}, "not available"),                                                 # firmware without get-profile
     ({"profile_model": True}, "state NONE · source NONE"),                 # FIX1 firmware, nothing started yet
 ])
 def test_the_status_area_shows_what_the_firmware_reports_about_the_profile(qapp, tmp_path, monkeypatch, fake,

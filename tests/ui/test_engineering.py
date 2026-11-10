@@ -21,7 +21,7 @@ from noctinirs_host.record.raw_archive import RawReplay
 from noctinirs_host.record.writer import Recorder
 from noctinirs_host_ui.engineering import EngineeringWindow
 from test_engineering_run import GEOMETRY
-from test_udp_session import Peer
+from calibration_fixture import CalibrationPeer as Peer, CalibrationReadyRun
 
 
 def wait_for(condition, seconds=8):
@@ -43,6 +43,7 @@ def window(qapp, tmp_path, monkeypatch):
                         lambda *a, **k: QtWidgets.QMessageBox.StandardButton.Yes)
 
     def open_window(**kwargs):
+        kwargs.setdefault("run_factory", CalibrationReadyRun)
         kwargs.setdefault("documents", tmp_path / "Documents")
         kwargs.setdefault("settings", QtCore.QSettings(str(tmp_path / "ui.ini"), QtCore.QSettings.Format.IniFormat))
         w = EngineeringWindow(load_geometry(GEOMETRY), **kwargs)
@@ -60,7 +61,7 @@ def window(qapp, tmp_path, monkeypatch):
 
 
 def fake_window(window, **fake_options):
-    return window(run_factory=lambda *a: EngineeringRun(*a, fake_options=fake_options))
+    return window(run_factory=lambda *a: CalibrationReadyRun(*a, fake_options=fake_options))
 
 
 def screenshot(w, filename):
@@ -100,6 +101,8 @@ def to_live(w, rate=10, baseline_s=1.0):
 
 
 def press_start(w):
+    if not w.state.get("calibration_ready"):
+        w.worker.submit("seed_calibration")
     wait_for(lambda: w.start_button.isEnabled())
     w.start_button.click()
 
@@ -323,7 +326,7 @@ def test_udp_worker_timeout_keeps_gui_responsive_and_recovery_explicit(window, t
         return [reply]
 
     peer.filter = hold_start
-    w = window(run_factory=lambda *args: EngineeringRun(*args, controller_factory=lambda tr:
+    w = window(run_factory=lambda *args: CalibrationReadyRun(*args, controller_factory=lambda tr:
                                                        SessionController(tr, timeout_s=.2)))
     try:
         w.next.click()
@@ -379,7 +382,7 @@ def test_recorder_open_error_is_reported_and_does_not_start(window, tmp_path):
         def start(self, **_kwargs):
             raise OSError("injected recorder open failure")
 
-    w = window(run_factory=lambda *args: EngineeringRun(*args, recorder_factory=BrokenRecorder))
+    w = window(run_factory=lambda *args: CalibrationReadyRun(*args, recorder_factory=BrokenRecorder))
     try:
         w.next.click()
         w.source.setCurrentIndex(1)
@@ -590,3 +593,27 @@ def test_robust_auto_scale_clamps_and_marks_spikes_but_full_range_does_not(qapp)
     assert panel.clamped_points("CH1") == 0
     assert panel.plots["CH1"].getPlotItem().viewRange()[1][1] > 100
     panel.close()
+
+
+def test_real_wizard_gates_start_before_and_after_a_fake_sweep(window):
+    from noctinirs_host.calibration import Assumptions
+    from noctinirs_host.calibration_sweep import SweepPlan
+
+    origin = time.monotonic()
+    clock = lambda: (time.monotonic() - origin) * 8
+    w = window(run_factory=lambda *args: EngineeringRun(
+        *args, controller_factory=lambda transport: SessionController(transport, clock),
+        fake_options={"clock": clock}, calibration_params=Assumptions(min_occurrences=4),
+        sweep_plan=SweepPlan((8, 67, 133), (4, 16, 67), 1)))
+    to_live(w)
+    assert not w.start_button.isEnabled()
+    w.record_check.setChecked(False)
+    start_calibration = w._calibration_controls[-1][0]
+    assert start_calibration.isEnabled()
+    start_calibration.click()
+    wait_for(lambda: w.start_button.isEnabled(), seconds=15)
+    w.start_button.click()
+    wait_for(lambda: w.state.get("preview_active"), seconds=8)
+    w.stop_button.click()
+    wait_for(lambda: w.state.get("stopped") and start_calibration.isEnabled())
+    assert not w.start_button.isEnabled()

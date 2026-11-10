@@ -7,6 +7,7 @@ the fix, except the one marked CONTROL (see HOST_D4_FIX4_REPORT.md).
 
 from pathlib import Path
 
+from calibration_fixture import seed_calibration
 from noctinirs_host.control import profile as PR      # module access: new names fail per test on 6642428
 from noctinirs_host.control.profile import EVENT_LIMIT, parse_profile
 from noctinirs_host.engineering import RecordingTarget
@@ -72,6 +73,7 @@ def run_at_limit(tmp_path, monkeypatch, free_slots):
     rig.go(lambda: run.profile_view and run.profile_view["phase"] == "running")
     for _ in range(RAW_EVENTS_LIMIT - free_slots - len(run.recorder.metadata()["events"])):
         run.recorder.event("review_filler", "x")
+    run.controller._t.simulator.bad_profile = True
     run.controller._last_hb = run.controller._clock()
     before = run.recorder.metadata()
     assert RAW_EVENTS_LIMIT - len(before["events"]) == free_slots
@@ -148,6 +150,7 @@ def test_h01b_safe_off_on_a_new_unstarted_recording_has_no_plan_epoch_of_the_pre
     target = RecordingTarget.parse(str(Path(tmp_path)), "record_2", "")
     run.check_destination(target)
     rig.go(lambda: run.checked_target == target and run._job is None)
+    seed_calibration(run)
     run.arm(target)
     assert run.latest_raw == {}
     rig.go(lambda: run.recorder_state == "ARMED" and run._job is None)

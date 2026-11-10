@@ -67,6 +67,7 @@ class Level:
     visits: int
     count: int
     excluded: tuple[str, ...] = ()
+    envelope: tuple[float, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -148,7 +149,7 @@ def model_choice(models, targets, g, c_min, c_max, fs, params):
 
 def level_exclusions(level, params, offsets=None):
     flags = list(level.excluded)
-    numbers = (*level.mean, *level.sigma, *level.minimum, *level.peak)
+    numbers = (*level.mean, *level.sigma, *level.minimum, *level.peak, *level.envelope)
     if (not all(isfinite(x) for x in numbers)
             or any(x >= params.headroom for x in level.peak)
             or any(x <= -params.headroom for x in level.minimum)):
@@ -159,7 +160,7 @@ def level_exclusions(level, params, offsets=None):
         flags.append("TIER2_ENVELOPE_INSUFFICIENT")
     corrections = offsets if offsets is not None else (0,) * len(level.mean)
     if any(p + (params.growth - 1) * max(0, x - a) > params.headroom
-           for p, x, a in zip(level.peak, level.mean, corrections, strict=True)):
+           for p, x, a in zip(level.peak, level.envelope or level.mean, corrections, strict=True)):
         flags.append("HEADROOM_LIMITED")
     return tuple(dict.fromkeys(flags))
 

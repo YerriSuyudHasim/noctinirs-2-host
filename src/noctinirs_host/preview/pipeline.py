@@ -103,9 +103,11 @@ def _invalid(ch, reason, i735=NAN, i850=NAN):
 
 class PreviewPipeline:
     def __init__(self, geometry: Geometry, config: PreviewConfig | None = None,
-                 nominal_fs_hz: float = 10.0) -> None:
+                 nominal_fs_hz: float = 10.0, *, calibration_headroom: float | None = None) -> None:
         self.geometry = geometry
         self.fs = float(nominal_fs_hz)
+        self.calibration_headroom = calibration_headroom
+        self.headroom_exceeded = False
         self.assembler = SlotAssembler()
         self._cycle: dict[int, SlotMeasurement] = {}
         self._last_slot = -1
@@ -270,6 +272,10 @@ class PreviewPipeline:
         """Per-AIN assessment, then history update. Contralateral AINs are assessed too: they are
         the negative control for the leak decision."""
         res = [_Ain() for _ in range(4)]
+        if self.calibration_headroom is not None and (
+                max(m.maximum) >= self.calibration_headroom or min(m.minimum) <= -self.calibration_headroom):
+            self.headroom_exceeded = True
+            return [_Ain(invalid="CLIP_DETECTED") for _ in range(4)]
         for a in range(4):
             r, st = res[a], self._stats.setdefault((m.slot, a), Q.SlotAinStats())
             if m.on_n < 1 or m.off_n < 1:

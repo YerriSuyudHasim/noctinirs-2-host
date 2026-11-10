@@ -15,7 +15,7 @@ pytest.importorskip("PySide6")
 
 from PySide6 import QtCore, QtGui, QtTest, QtWidgets
 
-from noctinirs_host.engineering import EngineeringRun
+from calibration_fixture import CalibrationReadyRun
 from noctinirs_host.geometry import load_geometry
 from noctinirs_host.preview.pipeline import ChannelPoint, FrameResult
 from noctinirs_host_ui import engineering as eng
@@ -169,7 +169,7 @@ def test_d4_01_main_returns_zero_after_closing_a_recording_session(qapp, tmp_pat
         wait_for(lambda: w._worker_finished, seconds=20)
         w.close()                                                # accepted: Qt deletes the window and its children
 
-    code = eng.main([], run_factory=lambda *a: EngineeringRun(*a, fake_options={}), settings=ini(tmp_path),
+    code = eng.main([], run_factory=CalibrationReadyRun, settings=ini(tmp_path),
                     documents=tmp_path / "Documents",
                     on_show=lambda w: QtCore.QTimer.singleShot(0, lambda: drive(w)))
     assert code == 0 and seen.get("recording_seen")

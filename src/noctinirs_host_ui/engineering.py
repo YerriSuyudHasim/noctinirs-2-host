@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from queue import Empty, Queue
 import re
@@ -14,6 +15,7 @@ import PySide6
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from noctinirs_host import __version__
+from noctinirs_host.calibration_sweep import load_configuration
 from noctinirs_host.engineering import EngineeringRun, UNKNOWN, default_recording_folder
 from noctinirs_host.geometry import load_geometry
 from noctinirs_host.preview import PREVIEW_LABEL
@@ -120,6 +122,7 @@ class EngineeringWindow(QtWidgets.QMainWindow):
         self._last_log = ()
         self._previewed = None
         self._recovery_buttons = []
+        self._clear_fault_buttons = []
         self._default_folder = str(default_recording_folder(documents))
         self.preview_cfg = PreviewConfig()
         self.worker = SessionWorker(geometry, host_sha, run_factory)   # no Qt parent: see SessionWorker
@@ -322,7 +325,7 @@ class EngineeringWindow(QtWidgets.QMainWindow):
         self.ap_list.currentIndexChanged.connect(self._render)
         form.addRow("Discovered devices", self.ap_list)
         self._shown_access_points = ()
-        self.scan_button = self._button("Cari perangkat", lambda: self._submit("discover"))
+        self.scan_button = self._button("Cari perangkat", self._discover)
         self.new_key = QtWidgets.QCheckBox("Use a different Wi-Fi password")
         page.addWidget(self.new_key)
         row = QtWidgets.QHBoxLayout()
@@ -585,6 +588,9 @@ class EngineeringWindow(QtWidgets.QMainWindow):
         row.addWidget(check)
         row.addWidget(safe)
         self._recovery_buttons.append((check, safe))
+        clear = self._button("Clear device fault", lambda: self._submit("clear_fault"))
+        row.addWidget(clear)
+        self._clear_fault_buttons.append(clear)
 
     def _recovery_row(self, page):
         row = QtWidgets.QHBoxLayout()
@@ -595,6 +601,9 @@ class EngineeringWindow(QtWidgets.QMainWindow):
         row.addStretch()
         page.addLayout(row)
         self._recovery_buttons.append((check, safe))
+        clear = self._button("Clear device fault", lambda: self._submit("clear_fault"))
+        row.addWidget(clear)
+        self._clear_fault_buttons.append(clear)
 
     # ---- actions ---------------------------------------------------------------
     def folder_text(self) -> str:
@@ -612,6 +621,10 @@ class EngineeringWindow(QtWidgets.QMainWindow):
     def _about(self):
         QtWidgets.QMessageBox.about(self, f"About {APP_NAME}",
                                     about_text(__version__, QtCore.qVersion(), PySide6.__version__))
+
+    def _discover(self):
+        self.source.setCurrentIndex(2)
+        self._submit("discover")
 
     def _connect(self):
         if self.source.currentIndex() == 2:
@@ -896,7 +909,7 @@ class EngineeringWindow(QtWidgets.QMainWindow):
         ap = self.ap_list.currentData()
         self.new_key.setVisible(bool(wifi and ap and ap.saved))
         self.new_key.setEnabled(idle)
-        self.scan_button.setVisible(wifi)
+        self.scan_button.setVisible(not connected)
         self.scan_button.setEnabled(idle)
         self.connect_button.setText("Hubungkan" if wifi else "Connect")
         self.connect_button.setEnabled(idle and (not wifi or ap is not None))
@@ -906,6 +919,11 @@ class EngineeringWindow(QtWidgets.QMainWindow):
             check.setVisible(uncertain)
             check.setEnabled(uncertain and not busy and s.get("start_wait", 0) <= 0)
             safe.setEnabled((connected or uncertain) and not busy)
+
+        for clear in self._clear_fault_buttons:
+            recoverable = connected and s.get("device_state") in ("FAULTED", "SAFE_OFF")
+            clear.setVisible(recoverable)
+            clear.setEnabled(recoverable and not (busy or recorder_open or disk))
 
         rates = s.get("allowed", ())
         if rates != self._rates:
@@ -1129,7 +1147,15 @@ def shutdown_worker(worker: SessionWorker) -> None:
 def main(argv=None, *, run_factory=EngineeringRun, settings=None, documents=None, on_show=None):
     parser = argparse.ArgumentParser(description="NoctiNIRS 2 Host RAW Engineering")
     parser.add_argument("--host-sha", help="Optional caller-supplied host build SHA")
+    parser.add_argument("--calibration-config", type=Path,
+                        help="Optional JSON overrides for calibration parameters and sweep grid")
     args = parser.parse_args(argv)
+    if args.calibration_config is not None:
+        try:
+            params, plan = load_configuration(args.calibration_config)
+        except (OSError, ValueError, TypeError) as exc:
+            parser.error(f"invalid calibration configuration: {exc}")
+        run_factory = partial(run_factory, calibration_params=params, sweep_plan=plan)
     if args.host_sha is not None and not re.fullmatch(r"[a-fA-F0-9]{40}", args.host_sha):
         parser.error("--host-sha must contain 40 hexadecimal characters")
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([sys.argv[0]])

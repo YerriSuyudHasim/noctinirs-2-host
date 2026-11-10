@@ -1,7 +1,7 @@
 """LED IREF calibration profile: `get-profile` (0x0034) reply parser, and request/test encoders.
 
-Read-only support for the firmware "Calib Stage-1" report (FIX1 key set, FIX2 evidence values). The host never fits, selects, derives or
-sends a profile on its own; this module only decodes what the device reports.
+Supports the Stage 1 FIX6 report (d11548065d0c24c6b46cb7672827d323d1f69d29)
+and the Stage 2 firmware contract S2-1.0.
 
 Pinned source (the host does not extend the protocol; changes are raised in `noctinirs-2`):
   firmware repo noctinirs-2, base 519a96a26ede6517595d4f8a87cd64ab6b7a6fa5 plus the local patch series
@@ -62,7 +62,7 @@ PROFILE_HASH_BYTES = 32
 PROFILE_ARG_BYTES = 4 + PROFILE_HASH_BYTES + IREF_SLOTS     # set-profile: id u32 LE, hash[32], code[20]
 MAX_TEXT = 1412                                              # firmware text capacity (payload 1440 - 28)
 
-STATES = ("NONE", "ARMED", "APPLIED", "NOT_APPLIED")
+STATES = ("NONE", "ARMED", "APPLIED", "NOT_APPLIED", "CONSUMED")
 SOURCES = ("NONE", "DEFAULT", "PROFILE")
 START_RESULTS = ("NONE", "OK", "PROFILE_NOT_APPLIED", "START_FAILED", "START_CANCELLED")
 STOP_EVIDENCE = ("NONE", "VALID_MATCH", "VALID_MISMATCH", "TRANSPORT_ERR", "TIMEOUT", "PREEMPTED",
@@ -83,13 +83,15 @@ _INT = re.compile(r"-?\d{1,11}")
 _HEX_ID = re.compile(r"0x[0-9A-Fa-f]{1,8}")
 
 _ENUM_KEYS = {"profile_state": STATES, "profile_source": SOURCES, "start_result": START_RESULTS,
-              "stop_evidence": STOP_EVIDENCE, "stop_integrity": INTEGRITY}
+              "stop_evidence": STOP_EVIDENCE, "stop_integrity": INTEGRITY,
+              "start_gate": ("OPEN", "NO_PROFILE", "PROFILE_CONSUMED"),
+              "session_short_status": ("NONE", "UNSET", "PROVISIONAL", "SET")}
 _CODE_KEYS = ("profile_code", "default_code", "requested_code", "applied_code", "applied_at_stop",
               "requested_ua", "applied_ua", "legacy_requested_ma")
 _INT_KEYS = ("reject_slot", "mismatch_slot", "stop_slot", "stop_error", "iref_ua_per_lsb",
              "iref_code_default", "iref_code_max")
 _BOOL_KEYS = ("profile_armed", "applied_read", "applied_valid", "stop_match")
-_ID_KEYS = ("profile_id", "applied_profile_id")
+_ID_KEYS = ("profile_id", "applied_profile_id", "session_table_id")
 _HASH_KEYS = ("profile_hash", "applied_profile_hash")
 _NAME_KEYS = ("last_profile_reject",)
 KNOWN_KEYS = (("profile_state", "profile_armed", "profile_id", "profile_hash", "profile_code",
@@ -98,7 +100,7 @@ KNOWN_KEYS = (("profile_state", "profile_armed", "profile_id", "profile_hash", "
                "applied_code", "applied_read", "applied_valid", "requested_ua", "applied_ua",
                "applied_at_stop", "stop_evidence", "stop_integrity", "stop_match", "stop_slot",
                "stop_error", "legacy_requested_ma", "iref_ua_per_lsb", "iref_code_default",
-               "iref_code_max"))
+               "iref_code_max", "start_gate", "session_table_id", "session_short_status"))
 _REMOVED_KEYS = ("stop_read",)       # present in the pre-FIX1 series (0001/0002); ignored, not an error
 MAX_EXTRA = 64
 RAW_VALUE_LIMIT = 400      # a raw integrity value longer than this is kept as value[:400] + "~len=N"
@@ -115,6 +117,9 @@ class ProfileReport:
     profile_id: int | None = None
     profile_hash: str | None = None       # 64 hex characters, None for "none"
     profile_code: tuple | None = None
+    start_gate: str | None = None
+    session_table_id: int | None = None
+    session_short_status: str | None = None
     last_reject: str | None = None
     reject_slot: int | None = None
     default_code: tuple | None = None
@@ -316,7 +321,8 @@ def encode_profile_text(*, state="NONE", armed=False, profile_id=0, profile_hash
                         stop_evidence="NONE", stop_integrity=None, stop_match=None, stop_slot=-1,
                         stop_error=0, legacy_requested_ma=None, iref_ua_per_lsb=225,
                         iref_code_default=133, iref_code_max=222, extra: str = "",
-                        legacy_stop_read: bool | None = None) -> bytes:
+                        legacy_stop_read: bool | None = None, start_gate=None,
+                        session_table_id=0, session_short_status="NONE") -> bytes:
     """The FIX1 text exactly as the firmware builds it (simulators and tests only). `extra` appends unknown
     keys; `legacy_stop_read` writes the pre-FIX1 `stop_read` key where FIX1 sends stop_evidence."""
     zeros = [0] * IREF_SLOTS
@@ -332,7 +338,8 @@ def encode_profile_text(*, state="NONE", armed=False, profile_id=0, profile_hash
            f"profile_id=0x{profile_id:08X} profile_hash={profile_hash.hex() if profile_hash else 'none'}"]
     if armed:
         out.append(f" profile_code={_list(profile_code if profile_code is not None else default_code)}")
-    out.append(f" last_profile_reject={last_reject} reject_slot={reject_slot} default_code={_list(default_code)}"
+    table = f"default_code={_list(default_code)}" if start_gate is None else f"start_gate={start_gate}"
+    out.append(f" last_profile_reject={last_reject} reject_slot={reject_slot} {table}"
                f" profile_source={source} start_result={start_result} mismatch_slot={mismatch_slot}"
                f" applied_profile_id=0x{applied_profile_id:08X} applied_profile_hash="
                f"{applied_profile_hash.hex() if applied_profile_hash else 'none'}"
@@ -345,6 +352,8 @@ def encode_profile_text(*, state="NONE", armed=False, profile_id=0, profile_hash
     else:
         out.append(f" stop_evidence={stop_evidence} stop_integrity={integrity} stop_match={int(bool(match))}"
                    f" stop_slot={stop_slot} stop_error={stop_error}")
+    if start_gate is not None:
+        out.append(f" session_table_id=0x{session_table_id:08X} session_short_status={session_short_status}")
     out.append(f" legacy_requested_ma={_list(legacy)} iref_ua_per_lsb={iref_ua_per_lsb}"
                f" iref_code_default={iref_code_default} iref_code_max={iref_code_max}")
     text = "".join(out) + (f" {extra}" if extra else "")
@@ -640,7 +649,7 @@ def profile_summary(report: ProfileReport | None, *, failure: str = "") -> str:
                "overflow": "the firmware report overflowed (nothing usable)",
                "empty_reply": "the device sent an empty reply",
                "unrecognised_reply": "the device reply was not a profile report"}.get(report.reason, report.reason)
-        return f"LED profile: not available ({why}). The device uses its own defaults."
+        return f"LED profile: not available ({why}). A usable profile report is required for host calibration."
     lines = [f"LED profile: state {report.state or '?'} · source {report.source or '?'} · "
              f"start result {report.start_result or '?'}"]
     if report.armed:

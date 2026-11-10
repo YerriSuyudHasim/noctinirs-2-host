@@ -7,6 +7,7 @@ Text fixtures are produced by `encode_profile_text`, which mirrors the C builder
 """
 
 import json
+from pathlib import Path
 import struct
 
 import pytest
@@ -19,6 +20,7 @@ from noctinirs_host.control.profile import (
 )
 from noctinirs_host.control.session import LoopbackTransport, SessionController
 from noctinirs_host.engineering import EngineeringRun
+from calibration_fixture import seed_calibration
 from noctinirs_host.geometry import load_geometry
 from noctinirs_host.wire.envelope import MAX_PAYLOAD
 from test_engineering_run import GEOMETRY
@@ -192,17 +194,12 @@ def test_set_profile_arguments_are_56_bytes_and_refuse_what_the_firmware_refuses
     assert req.opcode == 0x0103 and req.args == args
 
 
-def test_nothing_in_the_host_sends_set_or_clear_profile_by_itself():
-    from pathlib import Path
+def test_profile_writes_are_confined_to_the_calibration_workflow():
     root = Path(__file__).resolve().parents[1] / "src"
-    users = [p.relative_to(root).as_posix() for p in root.rglob("*.py")
-             if ("OP_SET_PROFILE" in p.read_text(encoding="utf-8") or "OP_CLEAR_PROFILE" in p.read_text(encoding="utf-8")
-                 or "args_set_profile" in p.read_text(encoding="utf-8"))]
-    assert sorted(users) == sorted(["noctinirs_host/control/engineering_fake.py", "noctinirs_host/control/profile.py",
-                                    "noctinirs_host/control/protocol.py"]), users
+    calls = [path.relative_to(root).as_posix() for path in root.rglob("*.py")
+             if ".set_profile(" in path.read_text(encoding="utf-8")]
+    assert calls == ["noctinirs_host/engineering.py"]
 
-
-# ---- the command path ------------------------------------------------------------------------------------------------
 
 def controller(**fake):
     sim = EngineeringFake(geometry=load_geometry(GEOMETRY), **fake)
@@ -280,7 +277,7 @@ def test_info_with_profile_tokens_is_accepted_by_connect_and_fs_capability():
 
 class Rig:
     def __init__(self, tmp_path, **fake):
-        self.run = EngineeringRun(load_geometry(GEOMETRY), fake_options=dict(profile_model=True, **fake))
+        self.run = EngineeringRun(load_geometry(GEOMETRY), fake_options=dict(profile_model=True, stage2_model=False, **fake))
         self.tmp = tmp_path
 
     def go(self, pred, seconds=8.0):
@@ -292,7 +289,7 @@ class Rig:
             time.sleep(0.01)
 
     def sidecar(self):
-        files = sorted(self.tmp.glob("record_*.json"))
+        files = sorted(self.tmp.glob("record_[0-9].json"))
         assert files
         return json.loads(files[0].read_text(encoding="utf-8"))
 
@@ -305,6 +302,7 @@ def start_recorded(tmp_path, **fake):
     run = rig.run
     run.connect(True, "", "")
     run.configure(5)
+    seed_calibration(run)
     run.start_recorded(str(tmp_path), "")
     return rig
 
@@ -321,13 +319,13 @@ def test_a_normal_run_records_the_profile_while_running_and_the_stop_evidence_at
     run = rig.run
     rig.go(lambda: run.controller.device_state == 3 and run.profile_view and run.profile_view["phase"] == "running")
     report = run.snapshot()["profile"]["report"]
-    assert report.state == "NONE" and report.source == "DEFAULT" and report.applied_valid is True   # no profile armed
+    assert report.state == "APPLIED" and report.source == "PROFILE" and report.applied_valid is True
     run.stop()
     rig.go(lambda: run.recorder_state == "FINALIZED", seconds=15)
     texts = rig.events("profile")
     assert [t.split()[0] for t in texts].count("phase=running") == 1 and any(t.startswith("phase=ended") for t in texts)
     running = next(t for t in texts if t.startswith("phase=running"))
-    assert "source=DEFAULT" in running and "applied_valid=1" in running and "start_result=OK" in running
+    assert "source=PROFILE" in running and "applied_valid=1" in running and "start_result=OK" in running
     assert "boot=0x" in running and "session=" in running
     ended = next(t for t in texts if t.startswith("phase=ended"))
     assert "stop_evidence=VALID_MATCH" in ended and "stop_integrity=OK" in ended and "applied_valid=0" in ended
@@ -341,16 +339,15 @@ def test_an_armed_profile_is_reported_applied_while_running_and_armed_afterwards
     run = rig.run
     run.connect(True, "", "")
     run.configure(5)
-    # The operator arms a profile by hand (the host never does this by itself)
-    assert run.controller._run("set_profile", P.OP_SET_PROFILE, args_set_profile(0xA1B2C3D4, HASH, CODES)).ok
+    profile = seed_calibration(run, CODES)
     run.start_recorded(str(tmp_path), "")
     rig.go(lambda: run.profile_view and run.profile_view["phase"] == "running")
     run.stop()
     rig.go(lambda: run.recorder_state == "FINALIZED", seconds=15)
     texts = rig.events("profile")
     running = next(t for t in texts if t.startswith("phase=running"))
-    for part in ("state=APPLIED", "armed=1", "id=0xA1B2C3D4", f"hash={HASH.hex()}", "source=PROFILE",
-                 "applied_valid=1", f"applied_hash={HASH.hex()}"):
+    for part in ("state=APPLIED", "armed=1", f"id=0x{profile.profile_id:08X}", f"hash={profile.profile_hash}", "source=PROFILE",
+                 "applied_valid=1", f"applied_hash={profile.profile_hash}"):
         assert part in running, part
     ended = next(t for t in texts if t.startswith("phase=ended"))
     assert "state=ARMED" in ended and "applied_valid=0" in ended and "stop_evidence=VALID_MATCH" in ended
@@ -418,7 +415,7 @@ def test_a_start_that_fails_after_the_ack_is_recorded_and_the_host_recovers(tmp_
 
 
 def test_firmware_without_get_profile_is_a_quiet_not_available_in_the_workflow(tmp_path):
-    run = EngineeringRun(load_geometry(GEOMETRY))                  # pre-profile fake
+    run = EngineeringRun(load_geometry(GEOMETRY), fake_options={"profile_model": False})
     run.connect(True, "", "")
     view = run.snapshot()["profile"]
     assert view["report"].reason == "unsupported" and "not available" in view["summary"]

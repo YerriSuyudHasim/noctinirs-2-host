@@ -180,7 +180,7 @@ class ControlPanel(QtWidgets.QWidget):
         fs_row.addWidget(self.fs_spin)
         fs_row.addWidget(self.fs_apply)
         gl.addLayout(fs_row)
-        self.led_section = _Collapsible("LED CURRENT (20 CHANNELS)", expanded=False)
+        self.led_section = _Collapsible("SIMULATED LED CURRENT (DEMO)", expanded=False)
         self.led_section.body.addWidget(self.led_table)
         self.led_table.setMinimumHeight(260)
         fill_row = QtWidgets.QHBoxLayout()
