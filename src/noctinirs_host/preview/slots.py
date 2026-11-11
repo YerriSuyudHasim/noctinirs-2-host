@@ -35,6 +35,7 @@ class SlotMeasurement:
     maximum: list = field(default_factory=lambda: [ADC_MIN] * 4)
     partial: bool = False   # started at stream start or after a gap, or ended by a gap
     gap: bool = False       # a sample discontinuity happened inside this occurrence
+    gap_before: bool = False  # a discontinuity preceded this occurrence
 
     def on_mean(self, ain: int) -> float | None:
         return self.on_sum[ain] / self.on_n if self.on_n else None
@@ -74,6 +75,7 @@ class SlotAssembler:
         self._expected: int | None = None
         self._epoch: int | None = None
         self._fresh = True  # next occurrence follows a start or a gap
+        self._gap_before = False
 
     def _close(self, out: list, *, gap: bool = False) -> None:
         if self._cur is not None:
@@ -101,6 +103,7 @@ class SlotAssembler:
         for i, s in enumerate(packet.samples):
             broken = (i == 0 and packet.gap_before) or (
                 self._expected is not None and s.sample_sequence != self._expected)
+            self._gap_before |= broken
             if broken or epoch != self._epoch:
                 self._close(out, gap=True)
                 self._fresh = True
@@ -114,8 +117,9 @@ class SlotAssembler:
                 self._close(out)
             if self._cur is None:
                 self._cur = SlotMeasurement(s.slot_index, epoch, s.sample_sequence, host_us,
-                                            partial=self._fresh)
+                                            partial=self._fresh, gap_before=self._gap_before)
                 self._fresh = False
+                self._gap_before = False
             cur = self._cur
             for k, v in enumerate(s.ain):
                 cur.minimum[k] = min(cur.minimum[k], v)

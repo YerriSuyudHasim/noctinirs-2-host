@@ -370,9 +370,17 @@ class PreviewPipeline:
                               optical_density(vals["850"], b[1].value), warns, sig["735"], sig["850"])
         points = {ch.name: self._finish(ch, stage) for ch in geo.channels}
         self._count_final(points)
-        if len(cycle) != 20 or any(m.partial or m.gap for m in cycle.values()):
+        complete = len(cycle) == 20
+        first_occurrence, *later_occurrences = cycle.values()
+        gap_within_cycle = any(m.gap_before for m in later_occurrences)
+        if (not complete or first_occurrence.gap_before or gap_within_cycle
+                or any(m.partial or m.gap for m in cycle.values())):
             self.filters.reset()
-        return FrameResult(t, self.filters.apply(points), len(cycle) == 20)
+        points = self.filters.apply(points)
+        if gap_within_cycle:
+            # A mixed cycle can still contain valid pre-gap channels. Clear their filter history too.
+            self.filters.reset()
+        return FrameResult(t, points, complete)
 
     def _count_final(self, points: dict) -> None:
         """Counts after SSR and MBLL, so every reason that hides or flags a channel is included."""

@@ -17,6 +17,7 @@ from noctinirs_host.engineering import (RecordingTarget, default_recording_folde
                                         next_record_number)
 from noctinirs_host.geometry import load_geometry
 from noctinirs_host.preview.baseline import MedianBaseline
+from noctinirs_host.preview.filters import FilterConfig
 from noctinirs_host.preview.dpf import scholkmann_wolf_dpf
 from noctinirs_host.preview.mbll import LN10, mbll_delta
 from noctinirs_host.preview.od import optical_density
@@ -27,7 +28,7 @@ from noctinirs_host.preview.pipeline import (BASELINE, INVALID, LEAK_WARN, LOW_S
                                               PreviewPipeline)
 from noctinirs_host.preview.shortsep import RollingRegressor, fit_beta
 from noctinirs_host.wire.envelope import parse_envelope
-from noctinirs_host.wire.optical import parse_raw
+from noctinirs_host.wire.optical import PH_OUTSIDE, RAW_SLOT_NONE, RawSample, parse_raw
 
 GEOMETRY = load_geometry(Path(__file__).resolve().parents[1] / "config/optical_geometry_v1.json")
 
@@ -480,3 +481,56 @@ def test_prepare_creates_folder_and_never_reuses_a_stem(tmp_path):
     for bad in ("relative/dir", "", " " + str(folder)):
         with pytest.raises(ValueError):
             RecordingTarget.prepare(bad)
+
+
+@pytest.mark.parametrize("gap_kind", ["aligned-outside", "normal", "partial"])
+def test_raw_sample_loss_restarts_causal_preview_filter(gap_kind):
+    config = PreviewConfig(baseline_s=0.2, min_baseline_samples=2)
+    filtered = PreviewPipeline(GEOMETRY, replace(config, filters=FilterConfig(
+        lowpass=True, channels=("CH1",))), 10)
+    unfiltered = PreviewPipeline(GEOMETRY, config, 10)
+    fake = EngineeringFake(geometry=GEOMETRY)
+    fake.fs_hz = 10
+    gap_cycle = 30
+    outputs = [[], []]
+
+    for cycle in range(gap_cycle + 4):
+        if cycle == gap_cycle - 1 and gap_kind != "partial":
+            continue
+        raw_packets = [parse_raw(parse_envelope(wire).payload)
+                       for wire in fake._cycle_packets(cycle, cycle / 10)]
+        outside = RawSample(0, (2000,) * 4, PH_OUTSIDE, RAW_SLOT_NONE)
+        cycle_samples = [outside, *(s for packet in raw_packets for s in packet.samples), outside]
+        first_seq = cycle * len(cycle_samples)
+        samples = [replace(sample, sample_sequence=first_seq + index)
+                   for index, sample in enumerate(cycle_samples)]
+        if cycle == gap_cycle and gap_kind == "normal":
+            samples = samples[1:]  # first slot becomes partial without PH_OUTSIDE
+        if cycle == gap_cycle and gap_kind == "partial":
+            # Lose the last sample of slot 4. CH1 uses earlier slots in this mixed cycle.
+            batches = [samples[:50], samples[51:]]
+        else:
+            batches = [samples]
+        for batch in batches:
+            for start in range(0, len(batch), 100):
+                chunk = batch[start:start + 100]
+                packet = replace(raw_packets[0], first_sample_sequence=chunk[0].sample_sequence,
+                                 sample_count=len(chunk), samples=tuple(chunk))
+                for pipeline, frames in zip((filtered, unfiltered), outputs):
+                    frames.extend(pipeline.feed(packet, cycle * 100_000))
+
+    assert filtered.loss_stats()["samples_missing"] > 0
+    assert filtered.loss_stats() == unfiltered.loss_stats()
+    resume_cycle = gap_cycle + (gap_kind == "partial")
+    elapsed = resume_cycle / 10
+    first = [next(frame for frame in frames if frame.t_s == elapsed) for frames in outputs]
+    after, raw = [frame.points["CH1"] for frame in first]
+    before = next(frame.points["CH1"] for frame in reversed(outputs[0]) if frame.t_s < (gap_cycle - 1) / 10)
+    assert not before.filter_warming
+    assert after.state == raw.state == VALID and after.filter_warming
+    assert (after.i735, after.i850) == (raw.i735, raw.i850)
+    if gap_kind == "aligned-outside":
+        assert first[0].complete and all(point.state == VALID for point in first[0].points.values())
+    gain = filtered.filters.sections[0][0]
+    for field in ("od735", "od850", "d_hbo", "d_hbr"):
+        assert getattr(after, field) == pytest.approx(gain * getattr(raw, field))
