@@ -6,12 +6,14 @@ from math import sqrt
 import pytest
 
 from noctinirs_host.calibration import Assumptions, DetectorModel, Level, empirical_choice, model_bounds, model_choice, x_min
-from noctinirs_host.calibration_sweep import SweepPlan
+from noctinirs_host.calibration_sweep import SweepPlan, Visit
 from noctinirs_host.control import protocol as p
 from noctinirs_host.control.default_table import SHORT_SLOTS
 from noctinirs_host.control.session import SessionController
 from noctinirs_host.preview.filters import FilterConfig
-from noctinirs_host.engineering import EngineeringRun
+from noctinirs_host.preview.slots import PH_OFF_STABLE, PH_ON_STABLE
+from noctinirs_host.wire.optical import PH_OUTSIDE, RAW_SLOT_NONE, RawPacket, RawSample
+from noctinirs_host.engineering import EngineeringRun, StartExhausted
 from noctinirs_host.geometry import load_geometry
 from test_engineering_run import GEOMETRY, poll
 from test_udp_session import Clock
@@ -268,6 +270,114 @@ def test_last_stage2_start_still_verifies_applied_but_reboot_is_needed_for_anoth
         with pytest.raises(ValueError, match="Reboot it"):
             run.calibrate()
         assert run.calibration is None and run.sweep is None
+    finally:
+        run.shutdown()
+        poll(run, lambda: run.finished)
+
+
+def sweep_visit(run, slot, code, signal):
+    """Feed scheduled stable phases into the real sweep accumulator."""
+    codes = [67] * 20
+    codes[slot] = code
+    profile = run._new_calibration_profile(codes, {"purpose": "synthetic-visit"})
+    visit = Visit(profile, count=2, map_id=run.geometry.geometry_map_id)
+    samples = []
+
+    def add(phase, index, count):
+        samples.append(RawSample(len(samples), (count,) * 4, phase, index))
+
+    add(PH_OUTSIDE, RAW_SLOT_NONE, 2000)
+    for occurrence in range(2):
+        for index in range(20):
+            strength = signal if index == slot else "strong"
+            step = {"weak": 2, "strong": 1000, "over-v": 100,
+                    "partial": 2, "lost": 2}[strength] + 2 * occurrence
+            peak = int(run.calibration_params.headroom - 10) if strength == "over-v" else 2000 + step
+            add(PH_ON_STABLE, index, peak)
+            if not (strength == "partial" and occurrence == 1):
+                add(PH_OFF_STABLE, index, peak - step)
+    add(PH_OUTSIDE, RAW_SLOT_NONE, 2000)
+
+    # Simulate a lost sample at a packet boundary while keeping the slot labels.
+    if signal == "lost":
+        split = len(samples) // 2
+        batches = (samples[:split], samples[split + 1:])
+    else:
+        batches = (samples,)
+    for batch in batches:
+        visit.feed(RawPacket(1, batch[0].sample_sequence, len(batch), False,
+                             run.geometry.geometry_map_id, tuple(batch)), b"synthetic", 0)
+    return visit
+
+
+@pytest.mark.parametrize(("short", "levels", "expected", "tier", "flag"), [
+    pytest.param(False, [(67, 1, "weak"), (133, 1, "partial"), (177, 5, "weak"), (222, 5, "weak")],
+                 67, 3, "INCOMPLETE_DATA", id="A-partial-default-with-high-candidates"),
+    pytest.param(False, [(222, 5, "weak")], None, None, "DEFAULT_UNVERIFIED",
+                 id="F-only-high-code-measured"),
+    pytest.param(False, [(67, 1, "weak"), (133, 1, "over-v"), (177, 5, "over-v"), (222, 5, "over-v")],
+                 67, 3, "DEFAULT_FAILS_V", id="C-monotonic-headroom-limit"),
+    pytest.param(True, [(32, 1, "weak"), (67, 1, "over-v")], 32, 3, "SHORT_INTERIM_67",
+                 id="E-short-interim-steps-down"),
+    pytest.param(False, [(133, 1, "weak"), (222, 5, "strong")], 222, 2, "HIGH_CURRENT_PROFILE",
+                 id="G-high-code-with-tier2-evidence"),
+    pytest.param(False, [(133, 1, "weak"), (222, 5, "weak")], 133, 3, "DEFAULT_TIER",
+                 id="H-safe-default"),
+    pytest.param(False, [(67, 1, "weak"), (133, 1, "lost")], 67, 3, "INCOMPLETE_DATA",
+                 id="packet-loss-and-low-snr-without-high-candidates"),
+])
+def test_sweep_finish_selects_and_arms_only_valid_profiles(short, levels, expected, tier, flag):
+    run, _ = run_fake()
+    try:
+        run.calibration_params = replace(run.calibration_params, min_occurrences=2)
+        run.calibrate()
+        sweep = run.sweep
+        slot = next(slot for slot in range(20) if (slot in sweep.short_slots) == short)
+        sweep.visits = [sweep_visit(run, slot, code, signal)
+                        for code, repeats, signal in levels for _ in range(repeats)]
+        sweep.order = [visit.profile.codes for visit in sweep.visits]
+        # The normal worker path runs Sweep.finish and publishes readiness after profile readback.
+        run.tick()
+        assert run.sweep is None
+        if expected is None:
+            assert run.calibration is None and not run.snapshot()["calibration_ready"]
+            assert flag in run.error and "DEFAULT_FAILS_V" not in run.error
+            assert not run.controller.query_profile().reply.profile.armed
+            with pytest.raises(ValueError, match="fresh calibration"):
+                run.start()
+            return
+        assert run.snapshot()["calibration_ready"], run.error
+        assert run.controller.profile.profile_code[slot] == expected
+        slot_result = run.calibration.document["slots"][slot]
+        choice = slot_result["selection"]
+        assert (choice["code"], choice["tier"]) == (expected, tier)
+        assert flag in choice["flags"]
+        if flag == "INCOMPLETE_DATA":
+            assert "DEFAULT_FAILS_V" not in choice["flags"]
+        if short:
+            assert {"DEFAULT_FAILS_V", "ASSUMED_SHORT_DEFAULT"} <= set(choice["flags"])
+            assert run.calibration.document["short_interim"]["status"] == "assumed_pending_caliper"
+    finally:
+        run.shutdown()
+        poll(run, lambda: run.finished)
+
+
+def test_start_exhaustion_reports_reboot_first(monkeypatch):
+    run, clock = run_fake()
+    try:
+        complete_sweep(run, clock)
+        device = run.controller._t.simulator
+        execute = device._execute
+
+        def exhaust_at_start(req, op, args):
+            if op == p.OP_START:
+                device._next_session = 0x100000000
+            return execute(req, op, args)
+
+        monkeypatch.setattr(device, "_execute", exhaust_at_start)
+        with pytest.raises(StartExhausted, match=r"^The device has no Start sessions left\. Reboot"):
+            run.start()
+        assert run.calibration is None and not run.snapshot()["calibration_ready"]
     finally:
         run.shutdown()
         poll(run, lambda: run.finished)

@@ -45,6 +45,10 @@ RECORD_STEM = "record_"
 _RECORD_FILE = re.compile(r"^record_(\d+)(\.json|\.csv|\.raw\.bin|\.raw\.csv|\.preview\.json|\.iref-v1\.json)$")
 
 
+class StartExhausted(ValueError):
+    """The firmware requires a reboot before accepting another START."""
+
+
 def documents_dir() -> Path:
     """The user's Documents folder (honours Windows folder redirection)."""
     if sys.platform == "win32":
@@ -388,7 +392,7 @@ class EngineeringRun:
     @staticmethod
     def _require_start_capacity(report):
         if report.start_gate == "START_EXHAUSTED":
-            raise ValueError("The device has no Start sessions left. Reboot it, reconnect, then run calibration again.")
+            raise StartExhausted("The device has no Start sessions left. Reboot it, reconnect, then run calibration again.")
 
     def _arm_calibration_profile(self, profile):
         self._result(self.controller.set_profile(profile.profile_id, bytes.fromhex(profile.profile_hash),
@@ -542,6 +546,8 @@ class EngineeringRun:
         self.calibration = self.calibration_armed = None  # a failed preflight also consumes the sweep
         try:
             self._start_with_calibration(sweep)
+        except StartExhausted:
+            raise
         except (ValueError, OSError) as exc:
             raise ValueError(f"Start did not complete. Run calibration again before Start. {exc}") from exc
 

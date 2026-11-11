@@ -314,7 +314,9 @@ class Sweep:
             choice = empirical_choice(levels, targets, self.defaults["codes"][slot], self.fs, self.params,
                                       short=slot in self.short_slots)
             if choice.code is None:
-                raise ValueError(f"Slot {slot} has no usable headroom evidence. Check the probe and run a new sweep.")
+                default_flags = ", ".join(choice.flags)
+                raise ValueError(f"Slot {slot} has no usable headroom evidence at or below its fallback code "
+                                 f"({default_flags}). Check the probe and run a new sweep.")
             choices.append(choice)
             summary.append(dict(slot=slot, targets=targets, selection=asdict(choice),
                                 levels=[dict(asdict(level), exclusions=level_exclusions(level, self.params))

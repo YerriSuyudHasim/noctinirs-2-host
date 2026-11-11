@@ -1041,8 +1041,9 @@ class EngineeringWindow(QtWidgets.QMainWindow):
             flags = ", ".join(s.get("calibration_flags", ()))
             short = s.get("short_interim_code", 67)
             status.set_text(s.get("calibration_status", "Run a fresh sweep before Start.")
-                            + f"\nTemporary short fallback: code {short}, subject to headroom. "
-                            "The wizard only reads the device default table."
+                            + f"\nShort fallback code {short} is assumed pending L1/L6 caliper measurements. "
+                            "It requires headroom evidence from this sweep. "
+                            "The wizard reads the device default table."
                             + (f"\nQuality warnings: {flags}" if flags else ""))
         self.start_button.setEnabled(ready and calibrated and not busy and not s.get("recording_open")
                                      and not s.get("session") and not self._folder_problem())

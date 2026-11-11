@@ -203,14 +203,17 @@ def empirical_choice(levels, targets, default_code, fs, params, offsets=None, *,
         default_code = params.short_interim_code
         flags.extend((f"SHORT_INTERIM_{default_code}", "ASSUMED_SHORT_DEFAULT"))
     flags.extend(("DEFAULT_TIER", "LOW_SIGNAL", "C_ON_UNVERIFIED"))
-    codes = {level.code for level in safe if not short or level.code <= default_code}
+    codes = {level.code for level in safe if level.code <= default_code}
     if default_code in codes:
         return Choice(default_code, 3, tuple(flags))
     tested_default = next((level for level in levels if level.code == default_code), None)
-    flags.append("DEFAULT_FAILS_V" if tested_default else "DEFAULT_UNVERIFIED")
+    if tested_default is None:
+        flags.append("DEFAULT_UNVERIFIED")
+    else:
+        exclusions = level_exclusions(tested_default, params, offsets)
+        flags.extend(exclusions)
+        if {"CLIP_DETECTED", "HEADROOM_LIMITED"}.intersection(exclusions):
+            flags.append("DEFAULT_FAILS_V")
     if not codes:
         return Choice(None, None, (*flags, "NO_HEADROOM_EVIDENCE"))
-    code = max(codes)
-    if code > LEGACY_DEFAULT:
-        flags.append("HIGH_CURRENT_PROFILE")
-    return Choice(code, 3, (*flags, "HEADROOM_LIMITED"))
+    return Choice(max(codes), 3, tuple(flags))

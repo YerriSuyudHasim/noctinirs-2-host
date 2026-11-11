@@ -72,10 +72,10 @@ The UI is a separate package, `noctinirs_host_ui`, built with PySide6 and pyqtgr
 
 ```powershell
 python -m pip install -e ".[dev,ui]"
-python -m noctinirs_host_ui
+python -m noctinirs_host_ui --demo
 ```
 
-The window shows a banner, a control panel for a **built-in simulated device** (Connect, Start, Stop, SAFE OFF, sampling rate, LED current per channel, event log), a demo signal (not device data) and an About dialog with third-party credits. A real device cannot be connected in this version.
+`--demo` opens the legacy control panel with a built-in loopback simulator. Its Start button generates demo frames without a calibration sweep. The default launcher opens the engineering wizard, which requires a sweep before acquisition.
 
 Build a standalone Windows folder app (PyInstaller, onedir) and a size and license report:
 

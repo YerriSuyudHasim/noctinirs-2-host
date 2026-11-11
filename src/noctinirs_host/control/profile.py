@@ -294,8 +294,8 @@ def parse_profile(ext: bytes | str) -> ProfileReport:
 def args_set_profile(profile_id: int, profile_hash: bytes, codes) -> bytes:
     """set-profile (0x0103) argument, 56 bytes: id u32 LE (not 0), hash[32] (opaque), code[20] (1..222).
 
-    Protocol layer only: nothing in the host sends it by itself. The device refuses (INVALID_ARG) an id of 0
-    and any code of 0 or above 222; the host refuses the same values locally and never clamps."""
+    The calibration workflow sends this payload before each START. The host and device both reject an
+    id of 0 and codes outside 1..222."""
     if isinstance(profile_id, bool) or not isinstance(profile_id, int) or not 1 <= profile_id <= 0xFFFFFFFF:
         raise ValueError("profile_id must be 1..0xFFFFFFFF")
     if not isinstance(profile_hash, (bytes, bytearray)) or len(profile_hash) != PROFILE_HASH_BYTES:

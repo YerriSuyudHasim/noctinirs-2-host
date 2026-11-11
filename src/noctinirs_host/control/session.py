@@ -183,8 +183,8 @@ class SessionController:
         self.battery = BatteryMonitor()
         self.battery_counters = dict(queries=0, timeouts=0, unsupported=0, errors=0)
         self.battery_log: list[str] = []
-        # LED calibration profile report (get-profile). Read-only and opt-in like the battery query; the
-        # host never sends set-profile / clear-profile by itself.
+        # Profile reporting is opt-in, like battery reporting. The calibration workflow explicitly
+        # calls set_profile before each START.
         self.profile_enabled = False
         self.profile: ProfileReport | None = None
         self.profile_counters = dict(queries=0, timeouts=0, unsupported=0, errors=0)
