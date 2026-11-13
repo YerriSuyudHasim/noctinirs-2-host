@@ -24,7 +24,7 @@ from noctinirs_host.preview.od import optical_density
 from noctinirs_host.preview.params import (LEGACY_PREVIEW_EXTINCTION, DpfSetting, ExtinctionTable,
                                            PreviewConfig, resolve_dpf)
 from noctinirs_host.preview import quality as Q
-from noctinirs_host.preview.pipeline import (BASELINE, INVALID, LEAK_WARN, LOW_SIGNAL, SSR_WARMUP, VALID,
+from noctinirs_host.preview.pipeline import (BASELINE, INVALID, LOW_SIGNAL, SSR_WARMUP, VALID,
                                               PreviewPipeline)
 from noctinirs_host.preview.shortsep import RollingRegressor, fit_beta
 from noctinirs_host.wire.envelope import parse_envelope
@@ -292,20 +292,22 @@ def test_exact_rail_samples_are_saturated():
     assert frames[-2].points["CH5"].state == INVALID and "SATURATED" in frames[-2].points["CH5"].reason
 
 
-def test_leak_is_a_warning_per_ain_and_invalid_only_when_large():
-    _, small = run_pipeline(leak={0: 500.0}, cycles=60)        # 0.8 % of the same-side step
-    last = small[-2].points
-    assert last["SC1L"].state == VALID and LEAK_WARN in last["SC1L"].warnings
-    assert last["CH1"].state == VALID and LEAK_WARN not in last["CH1"].warnings
-    _, large = run_pipeline(leak={0: 20000.0}, cycles=60)     # above 10 % of the same-side step
-    last = large[-2].points
-    assert last["SC1L"].state == INVALID and "LEAK_SUSPECT" in last["SC1L"].reason
-    assert last["CH1"].state == VALID                         # another AIN is not dropped for it
-
-
-def test_leak_never_invalidates_before_sigma_is_known():
-    _, frames = run_pipeline(leak={0: 20000.0}, cycles=4)
-    assert all("LEAK_SUSPECT" not in fr.points["SC1L"].reason for fr in frames)
+def test_a_step_on_the_opposite_side_detector_is_not_a_fault():
+    """Owner decision 2026-11-13: light seen by the detector on the other side of the source is a legitimate
+    tissue path. No cross-side rule may warn or invalidate, however large that step is."""
+    def cross_side(cycle, slot, phase, ain):
+        if slot == 0 and phase in (3, 4):
+            ain[0] += 20000          # AIN0 is the right-side PD for the left-side source of slot 0
+        return ain
+    for cycles in (4, 60):
+        _, frames = run_pipeline(mutate=cross_side, cycles=cycles)
+        for fr in frames:
+            for p in fr.points.values():
+                assert "LEAK" not in p.reason and not any("LEAK" in w for w in p.warnings)
+    last = frames[-2].points
+    assert last["SC1L"].state == VALID and last["CH1"].state == VALID
+    assert not any(hasattr(__import__("noctinirs_host.preview.pipeline", fromlist=["x"]), n)
+                   for n in ("LEAK_WARN", "LEAK_SUSPECT"))
 
 
 def test_sigma_is_estimated_online_and_saved():

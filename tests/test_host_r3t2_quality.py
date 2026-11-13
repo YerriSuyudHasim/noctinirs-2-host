@@ -112,9 +112,9 @@ def test_motion_detector_needs_enough_eligible_channels_and_persistence():
         return det.update(t, z)
     for _ in range(5):                                 # only one eligible channel: never a marker
         assert step({"a": 50.0}) == {"L": False, "R": False}
-    for _ in range(2):                                 # two flagged channels but only 2 frames: not yet
+    for _ in range(cfg.motion_persist - 1):            # two flagged channels but one frame short: not yet
         assert step({"a": 9.0, "b": 9.0, "c": 1.0})["L"] is False
-    assert step({"a": 9.0, "b": 9.0, "c": 1.0}) == {"L": True, "R": False}     # third frame: marker, left only
+    assert step({"a": 9.0, "b": 9.0, "c": 1.0}) == {"L": True, "R": False}     # last needed frame: marker, left only
     assert step({"a": 1.0, "b": 1.0, "c": 1.0})["L"] is False
     summary = det.summary()
     assert summary["segments"][0][0] == "L" and summary["frames"]["R"] == 0
@@ -150,7 +150,7 @@ def stage_for(pl, **states):
     return base
 
 
-def test_short_gate_blocks_weak_leaky_achromatic_moving_or_invalid_shorts():
+def test_short_gate_blocks_weak_achromatic_moving_or_invalid_shorts():
     pl = board1_pipeline()
     ch = next(c for c in pl.geometry.channels if c.name == "CH1")
     ok_q = ChannelQuality()
@@ -158,7 +158,8 @@ def test_short_gate_blocks_weak_leaky_achromatic_moving_or_invalid_shorts():
     assert pl._short_gate(ch, ["SC1L"], stage_for(pl)) == []
     assert pl._short_gate(ch, ["SC1L"], stage_for(pl, SC1L=("INVALID", "735: SATURATED", 0, 0, 0, 0, (), 1, 1))) == [("SC1L", "SATURATED")]
     assert pl._short_gate(ch, ["SC1L"], stage_for(pl, SC1L=("VALID", "", 1, 1, 0, 0, ("LOW_SIGNAL",), 1, 1))) == [("SC1L", "LOW_SIGNAL")]
-    assert pl._short_gate(ch, ["SC1L"], stage_for(pl, SC1L=("VALID", "", 1, 1, 0, 0, ("LEAK_WARN",), 1, 1))) == [("SC1L", "LEAK_WARN")]
+    # Tahap 2.1: the cross-side leak criterion is gone. A leftover LEAK_WARN tag can no longer block a short.
+    assert pl._short_gate(ch, ["SC1L"], stage_for(pl, SC1L=("VALID", "", 1, 1, 0, 0, ("LEAK_WARN",), 1, 1))) == []
     pl._quality = {"SC1L": (ok_q, 40.0, 40.0, 40.0)}
     assert pl._short_gate(ch, ["SC1L"], stage_for(pl)) == [("SC1L", "SNR_FRAME_LOW")]
     pl._quality = {"SC1L": (ChannelQuality(flags=(ACHROMATIC,)), 500.0, 500.0, 500.0)}

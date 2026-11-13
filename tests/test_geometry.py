@@ -31,11 +31,15 @@ def test_channel_lookup_and_unselected_pair():
     assert geo.channel_for(0, 0) is None  # L1 -> PD3 is opposite side, not a channel
 
 
-def test_contralateral_negative_control():
+def test_cross_side_pairs_are_not_channels_yet_but_need_no_special_case():
+    """Tahap 2.1: the cross-side "leak" rule is gone (no is_contralateral). A cross-side pair such as L1 -> PD3
+    simply is not a selected channel today; adding one later (after the Owner measures the distance)
+    is a data change in the channel list, not a new code path."""
     geo = load_geometry(GEO)
-    assert geo.is_contralateral(0, 0)  # L1 (side L) vs PD3 (side R)
-    assert not geo.is_contralateral(0, 2)  # L1 vs PD1 (side L)
-    assert geo.is_contralateral(10, 2)  # L6 (side R) vs PD1 (side L)
+    assert not hasattr(geo, "is_contralateral")
+    assert geo.channel_for(0, 0) is None        # L1 -> PD3 (opposite side): not selected
+    assert geo.channel_for(10, 2) is None       # L6 -> PD1 (opposite side): not selected
+    assert geo.pd_for_ain(0).side != geo.source_for_slot(0)[0].side   # the sides are still known
 
 
 def _mutated(tmp_path, fn):

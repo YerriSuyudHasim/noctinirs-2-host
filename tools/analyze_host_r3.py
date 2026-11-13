@@ -10,6 +10,9 @@ from noctinirs_host.calibration import Assumptions,Level,empirical_choice
 from noctinirs_host.calibration_sweep import spectral_noise
 from noctinirs_host.geometry import load_geometry
 
+def side_of_pd(geo,ain):return geo.pd_for_ain(ain).side
+def side_of_slot(geo,slot):return geo.source_for_slot(slot)[0].side  # tool-local; the library no longer has a leak/contralateral rule
+
 p=argparse.ArgumentParser()
 p.add_argument('--data',type=Path,required=True);p.add_argument('--evidence',type=Path,required=True)
 a=p.parse_args();out=a.evidence;geo=load_geometry('config/optical_geometry_board1.json')
@@ -56,7 +59,7 @@ for n in (1,2):
             for slot in range(20):
                 slotrows=rows[rows[:,1]==slot]
                 x=slotrows[:,2+ain]
-                if geo.is_contralateral(slot,ain) and len(x)>1:
+                if side_of_pd(geo,ain)!=side_of_slot(geo,slot) and len(x)>1:
                     values.append(float(np.median(x)))
                     delta=np.diff(slotrows[:,6+ain]);noise.append(float(1.4826*np.median(abs(delta-np.median(delta)))/np.sqrt(2)))
             off[ain][preset]=dict(negative_control_step_median=float(np.median(values)),off_frame_noise=float(np.median(noise)))

@@ -31,8 +31,8 @@ class EngineeringFake(DeviceSimulator):
 
     Test hooks (all synthetic): ``dead_slots`` (LED never steps), ``saturate`` (set of
     (slot, ain) pinned at the ADC rail), ``drop_cycles`` (cycle numbers never sent, leaving a
-    sequence discontinuity), ``info_extra`` (appended to the INFO text), ``leak`` (slot ->
-    contralateral step in counts).
+    sequence discontinuity), ``info_extra`` (appended to the INFO text), ``noisy`` (slot -> standard deviation of extra
+    Gaussian noise on the ON samples, in counts: makes LOW_SIGNAL happen without removing the LED step).
 
     ``profile_model=True`` models firmware with the Calib Stage-1 FIX1 profile report (a MODEL written from
     the patch sources, not the firmware): get-profile / set-profile / clear-profile, the extra INFO tokens
@@ -46,11 +46,11 @@ class EngineeringFake(DeviceSimulator):
     dead_slots: frozenset = frozenset()
     saturate: frozenset = frozenset()
     drop_cycles: frozenset = frozenset()
-    leak: dict = {}
+    noisy: dict = {}
     info_extra: str = ""
 
     def __init__(self, *args, **kwargs):
-        opts = {k: kwargs.pop(k) for k in ("dead_slots", "saturate", "drop_cycles", "leak",
+        opts = {k: kwargs.pop(k) for k in ("dead_slots", "saturate", "drop_cycles", "noisy",
                                            "info_extra", "battery_mode", "battery",
                                            "battery_age_override_ms", "profile_model", "start_outcome",
                                            "stop_evidence", "stage2_model") if k in kwargs}
@@ -269,8 +269,7 @@ class EngineeringFake(DeviceSimulator):
             return 0.0
         ch = geo.channel_for(slot, ain)
         if ch is None:
-            step = self.leak.get(slot, 0.0) if geo.is_contralateral(slot, ain) else 0.0
-            return float(step)
+            return 0.0
         return 60000.0 * math.exp(-(ch.sd_mm - 5.0) / 6.0)
 
     def _modulation(self, slot: int, ain: int, t: float) -> float:
@@ -290,6 +289,8 @@ class EngineeringFake(DeviceSimulator):
                     on = phase in (3, 4)
                     scale = self._profile[2][slot] / 133 if self._profile else 1.0
                     v = ambient + (scale * self._base(slot, ain) * self._modulation(slot, ain, t) if on else 0)
+                    if on and slot in self.noisy:
+                        v += self._rng.gauss(0.0, self.noisy[slot])
                     if (slot, ain) in self.saturate and phase == 4:
                         v = ADC_MAX
                     row.append(max(-ADC_MAX, min(ADC_MAX, int(round(v)))))

@@ -1,8 +1,10 @@
 """RAW ENGINEERING -> PREVIEW chain: slot ON/OFF -> I -> baseline -> OD -> (SSR) -> MBLL.
 
 PREVIEW only. A channel is INVALID (NaN, drawn as a gap, never 0) only for: missing/partial data,
-no ON or OFF samples, saturation, an ambient jump, I <= 0 or not finite, or a large leak.
-Weaker problems are WARNINGS (LOW_SIGNAL, LEAK_WARN): the value is still shown and flagged.
+no ON or OFF samples, saturation, an ambient jump or I <= 0 / not finite. There is no cross-side
+"leak" rule: light seen by a detector on the opposite side of the source is a legitimate tissue path
+(Owner decision 2026-11-13), not a fault. Weaker problems are WARNINGS (LOW_SIGNAL, ACHROMATIC_SUSPECT):
+the value is still shown and flagged.
 When the short-separation regressor is not ready or its short channel is invalid, the long
 channel is shown without correction and labelled UNCORRECTED, not hidden.
 
@@ -32,7 +34,7 @@ from .slots import SlotAssembler, SlotMeasurement
 NAN = float("nan")
 VALID, INVALID, BASELINE, SSR_WARMUP = "VALID", "INVALID", "BASELINE", "SSR_WARMUP"
 SSR_OFF, SSR_APPLIED, SSR_UNCORRECTED = "off", "applied", "UNCORRECTED"
-LOW_SIGNAL, LEAK_WARN = "LOW_SIGNAL", "LEAK_WARN"
+LOW_SIGNAL = "LOW_SIGNAL"
 
 
 @dataclass(frozen=True)
@@ -59,6 +61,7 @@ class ChannelPoint:
     # Quality indicators (flag-only; see signal_quality.py). None = not assessable.
     sci: float | None = None
     cardiac_db: float | None = None
+    cardiac_class: str | None = None      # "clear" / "weak" / "faint" from cardiac_db (display only)
     r_hbo_hbr: float | None = None
     tier: str = TIER_NA
     motion_z: float | None = None
@@ -93,8 +96,6 @@ class _Ain:
     sigma_known: bool = False
     invalid: str = ""
     low_signal: bool = False
-    leak_warn: bool = False
-    leak_invalid: bool = False
 
 
 def _reason_code(reason: str) -> str:
@@ -305,8 +306,7 @@ class PreviewPipeline:
 
     # ---- assessment of one slot occurrence -----------------------------------------
     def _assess_slot(self, m: SlotMeasurement) -> list:
-        """Per-AIN assessment, then history update. Contralateral AINs are assessed too: they are
-        the negative control for the leak decision."""
+        """Per-AIN assessment, then history update. Every AIN is assessed on its own."""
         res = [_Ain() for _ in range(4)]
         for a in range(4):
             r, st = res[a], self._stats.setdefault((m.slot, a), Q.SlotAinStats())
@@ -342,21 +342,6 @@ class PreviewPipeline:
             between, known = st.step_sigma()
             r.sigma, r.sigma_known = max(within, between), known
             r.low_signal = step < Q.LOW_SIGNAL_SIGMA * r.sigma
-        # leak: each AIN of the source's own side is judged against the opposite-side steps
-        for a in range(4):
-            if self.geometry.is_contralateral(m.slot, a) or res[a].step is None or res[a].invalid:
-                continue
-            for c in range(4):
-                if not self.geometry.is_contralateral(m.slot, c):
-                    continue
-                rc = res[c]
-                if rc.step is None or rc.step <= 0 or m.saturated[c] or rc.invalid:
-                    continue
-                if rc.step > Q.LEAK_WARN_SIGMA * rc.sigma:
-                    res[a].leak_warn = True
-                limit = max(Q.LEAK_INVALID_SIGMA * rc.sigma, Q.LEAK_INVALID_REL * res[a].step)
-                if rc.sigma_known and rc.step > limit:
-                    res[a].leak_invalid = True
         return res
 
     def _intensity(self, m: SlotMeasurement | None, assess: list | None, ain: int):
@@ -368,10 +353,7 @@ class PreviewPipeline:
         a = assess[ain]
         if a.invalid:
             return None, a.invalid, (), NAN
-        if a.leak_invalid:
-            return None, "LEAK_SUSPECT", (), NAN
-        warns = tuple(w for w, on in ((LOW_SIGNAL, a.low_signal), (LEAK_WARN, a.leak_warn)) if on)
-        return a.step, "", warns, a.sigma
+        return a.step, "", ((LOW_SIGNAL,) if a.low_signal else ()), a.sigma
 
     # ---- evaluation ----------------------------------------------------
     def _process(self, cycle: dict) -> FrameResult:
@@ -440,8 +422,6 @@ class PreviewPipeline:
                 why = _reason_code(st[1]) if st[0] == INVALID else st[0]
             elif LOW_SIGNAL in st[6]:
                 why = LOW_SIGNAL
-            elif LEAK_WARN in st[6]:
-                why = LEAK_WARN
             elif snr is None or snr < cfg.ssr_min_snr:
                 why = "SNR_FRAME_LOW"
             elif cfg.ssr_gate_achromatic and q is not None and ACHROMATIC in q.flags:
@@ -517,7 +497,7 @@ class PreviewPipeline:
         extra = {}
         if qinfo is not None:
             q, snr_min = qinfo[0], qinfo[1]
-            extra = dict(sci=q.sci, cardiac_db=q.cardiac_db, r_hbo_hbr=q.r_hbo_hbr, motion_z=q.motion_z,
+            extra = dict(sci=q.sci, cardiac_db=q.cardiac_db, cardiac_class=q.cardiac_class, r_hbo_hbr=q.r_hbo_hbr, motion_z=q.motion_z,
                          tier=tier_for(snr_min, q, self.config.quality))
             if ACHROMATIC in q.flags:   # warning only: the channel is shown, never removed automatically
                 common = dict(common, warnings=tuple(dict.fromkeys((*common["warnings"], ACHROMATIC))))

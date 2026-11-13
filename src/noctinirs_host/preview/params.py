@@ -145,7 +145,7 @@ class PreviewConfig:
                                  "correction_lowpass_hz": self.ssr_correction_lowpass_hz, "cardiac_protection": True,
                                  "gate": {"min_snr_frame": self.ssr_min_snr, "achromatic": self.ssr_gate_achromatic,
                                           "motion": self.ssr_gate_motion,
-                                          "also": "invalid, LOW_SIGNAL, LEAK_WARN, clipped/saturated"}},
+                                          "also": "invalid, LOW_SIGNAL, clipped/saturated"}},
             "signal_quality": self.quality.to_metadata(),
             "display_filters": self.filters.metadata(),
             "off_window": self.off_window,

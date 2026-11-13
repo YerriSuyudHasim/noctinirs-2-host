@@ -3,6 +3,15 @@
 `Geometry.pd_for_ain()` is the ONLY place that translates an AIN index to a
 photodiode. All other lookups go through it. Do not build a second map.
 Wavelength labels ("735"/"850") are nominal; identity is not verified (D7).
+
+Prepared, NOT implemented (tahap 2.1): cross-side channels (a source on one side measured by the PD on the
+other side, e.g. L2 -> right PD, L7/L8 -> left PD) are legitimate tissue paths, not leaks. They are not selected
+today because their distances are not measured yet (the Owner will measure them with a caliper; never guess).
+Nothing in the host assumes that a channel's PD is on the source's side: `channel_for` matches (source, PD)
+only, `ChannelInfo.kind` is a free label that downstream code compares for "long" / "short", and the pipeline
+loops over `geometry.channels`. Adding such a channel later is therefore a data change in the geometry file plus
+relaxing the two count checks in `load_geometry` (20 channels, 2 per source), plus a decision on how it enters
+calibration targets and SSR pairing. Do not add one before its source-detector distance is measured.
 """
 
 from __future__ import annotations
@@ -93,11 +102,6 @@ class Geometry:
         if self.exclude_unselected_short_from_safety and any(self.channel_for(slot, i).kind == "short" for i in targets):
             return tuple(i for i in range(4) if self.channel_for(slot, i) is None or i in targets)
         return (0, 1, 2, 3)
-
-    def is_contralateral(self, slot: int, ain: int) -> bool:
-        """True if the detector is on the opposite side of the source (negative control)."""
-        src, _ = self.source_for_slot(slot)
-        return self.pd_for_ain(ain).side != src.side
 
 
 def _strict_int(v: object, what: str, lo: int, hi: int) -> int:

@@ -199,6 +199,7 @@ KEYS = {"Hb": ("hbo", "hbr"), "OD": ("od1", "od2"), "I": ("i1", "i2")}
 
 
 _TIER_TEXT = {"good": "baik", "noisy": "berisik", "bad": "buruk", "not_assessable": "tidak dapat dinilai"}
+_CARDIAC_TEXT = {"clear": "jelas", "weak": "lemah", "faint": "sulit terlihat"}
 
 
 def channel_order(geometry) -> list:
@@ -364,7 +365,7 @@ class PreviewPanel(QtWidgets.QWidget):
     Each row has both traces in one plot (ΔHbO and ΔHbR, or the OD / intensity pair) and shares one time
     axis with all the others (linked X; the sticky footer carries the labels). Quality is shown on
     each row: a gap is missing or invalid data; a drawn line carries markers for warnings (LOW_SIGNAL,
-    LEAK_WARN) and for a channel shown without short-separation correction. The display controls are
+    ACHROMATIC_SUSPECT) and for a channel shown without short-separation correction. The display controls are
     in `controls`; the window puts them in the settings panel. Only rows in view are redrawn."""
 
     selected = QtCore.Signal(str)
@@ -629,7 +630,7 @@ class PreviewPanel(QtWidgets.QWidget):
         self.legend.setText(
             f"{self._trace_legend(c1, c2, n1, n2)} · <b>Celah</b> = data hilang/invalid · "
             f"<span style='color:{t.marker_warning}'><b>▲</b></span> "
-            f"peringatan (LOW_SIGNAL / LEAK_WARN) · "
+            f"peringatan (LOW_SIGNAL / ACHROMATIC_SUSPECT) · "
             f"<span style='color:{t.marker_uncorrected}'><b>◆</b></span> tanpa koreksi SCR · "
             f"<span style='color:{t.marker_clamp}'><b>●</b></span> di luar skala · label 735/850 nominal")
 
@@ -1064,6 +1065,9 @@ class PreviewPanel(QtWidgets.QWidget):
                  ("Kategori kualitas (PROVISIONAL, satu subjek; ambang dapat diatur)", _TIER_TEXT.get(p.tier, p.tier)),
                  ("SCI (korelasi 735/850, pita jantung) / jantung dB",
                   f"{fmt(p.sci, 3)} / {fmt(p.cardiac_db, 3)}"),
-                 ("r(ΔHbO, ΔHbR) pita jantung (≈ +1: akromatik = kebocoran/shunt)", fmt(p.r_hbo_hbr, 3)),
+                 ("Denyut jantung terlihat? (PROVISIONAL: >6 dB jelas, 3–6 lemah, <3 sulit terlihat)",
+                  _CARDIAC_TEXT.get(p.cardiac_class, "tidak dapat dinilai")),
+                 ("r(ΔHbO, ΔHbR) pita jantung (≈ +1: akromatik = kemungkinan jalur non-hemodinamik/shunt; peringatan saja)",
+                  fmt(p.r_hbo_hbr, 3)),
                  ("Penanda gerak hemisfer (hanya penanda)", "GERAK" if self._motion_for(name) else "tidak ada")]
         return rows

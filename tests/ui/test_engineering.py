@@ -284,12 +284,12 @@ def test_live_settings_change_and_baseline_reset(window):
     press_start(w)
     wait_for(lambda: w.state.get("preview_active"))
     wait_for(lambda: w.panel.finite_points("CH1") > 2, seconds=15)
-    w.live_form.ssr_mode.setCurrentIndex(w.live_form.ssr_mode.findData("off"))
+    w.live_form.ssr_mode.setCurrentIndex(w.live_form.ssr_mode.findData("5mm"))
     w.live_form.dpf_mode.setCurrentIndex(w.live_form.dpf_mode.findData("age"))
     w.live_form.age.setValue(28.0)
     assert "outside the published fit range" in w.live_form.dpf_info.text()
     w.apply_live_button.click()
-    wait_for(lambda: w.state["preview_config"].ssr_mode == "off"
+    wait_for(lambda: w.state["preview_config"].ssr_mode == "5mm"
              and w.state["preview_config"].dpf.mode == "age")
     w.reset_baseline_button.click()
     wait_for(lambda: not w._pending)
@@ -522,9 +522,9 @@ def test_live_layout_controls_left_graphs_right_and_plots_follow_the_window(wind
 
 
 def test_click_opens_channel_detail_and_markers_differ_from_gaps(window, monkeypatch):
-    # CH1 (source L2) gets a small opposite-side step: a warning, the line stays.
+    # CH1 (source L2) gets heavy noise on its ON samples: LOW_SIGNAL, a warning, the line stays.
     # CH5 is saturated: a gap. SC1L/SC2L are dead, so the left long channels go uncorrected with 5 mm SCR.
-    w = fake_window(window, leak={2: 60.0}, saturate=frozenset({(6, 3), (7, 3)}), dead_slots=frozenset({0, 1}))
+    w = fake_window(window, noisy={2: 4000.0, 3: 4000.0}, saturate=frozenset({(6, 3), (7, 3)}), dead_slots=frozenset({0, 1}))
     to_live(w)
     w.live_form.ssr_mode.setCurrentIndex(w.live_form.ssr_mode.findData("5mm"))
     wait_for(lambda: w.apply_live_button.isEnabled())
@@ -543,7 +543,7 @@ def test_click_opens_channel_detail_and_markers_differ_from_gaps(window, monkeyp
     assert all("◆" in w.panel.rows[n].status.text() for n in only_uncorrected)
     shown = []                                                 # the real Qt tooltip event path, not tip_provider
     monkeypatch.setattr(QtWidgets.QToolTip, "showText", lambda *args, **kwargs: shown.append(args[1]))
-    for name, expected in (("CH1", "LEAK_WARN"), (only_uncorrected[0], "tanpa koreksi")):
+    for name, expected in (("CH1", "LOW_SIGNAL"), (only_uncorrected[0], "tanpa koreksi")):
         row = w.panel.rows[name]
         point = QtCore.QPoint(10, 10)
         event = QtGui.QHelpEvent(QtCore.QEvent.Type.ToolTip, point, row.mapToGlobal(point))
