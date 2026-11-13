@@ -610,7 +610,7 @@ def test_real_wizard_gates_start_before_and_after_a_fake_sweep(window):
 
     w = window(run_factory=lambda *args: TickClockRun(
         *args, controller_factory=lambda transport: SessionController(transport, clock),
-        fake_options={"clock": clock}, calibration_params=Assumptions(min_occurrences=4),
+        fake_options={"clock": clock}, calibration_params=Assumptions(min_occurrences=4, visit_target_occurrences=5),
         sweep_plan=SweepPlan((8, 67, 133), (4, 16, 67), 1)))
     to_live(w)
     assert not w.start_button.isEnabled()

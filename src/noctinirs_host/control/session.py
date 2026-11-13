@@ -24,7 +24,7 @@ from ..wire.envelope import MSG_FRAME, parse_envelope
 from ..wire.errors import WireError
 from ..wire.optical import LAYOUT_RAW, parse_raw
 from .protocol import (
-    LED_CHANNELS, LED_MAX_MA, OP_CLEAR_FAULT, OP_GET_BATTERY, OP_GET_CONFIG, OP_GET_PROFILE, OP_GET_TIME, OP_HEARTBEAT, OP_INFO, OP_SAFE_OFF,
+    OP_GET_NETDIAG, LED_CHANNELS, LED_MAX_MA, OP_CLEAR_FAULT, OP_GET_BATTERY, OP_GET_CONFIG, OP_GET_PROFILE, OP_GET_TIME, OP_HEARTBEAT, OP_INFO, OP_SAFE_OFF,
     OP_GET_DEFAULT_TABLE, OP_SET_DEFAULT_TABLE, OP_SET_PROFILE, OP_CLEAR_PROFILE, OP_SET_FS, OP_SET_LED_CURRENT, OP_SET_MODE, OP_START, OP_STATUS, OP_STOP, ST_STOPPED,
     ST_STARTING, ST_STOPPING,
     ST_FAULTED, ST_SAFE_OFF, ST_STREAMING, STATUS_UNKNOWN_COMMAND, TIMED_OPS, Reply, args_host_time, args_set_fs, args_set_led_current,
@@ -32,6 +32,8 @@ from .protocol import (
 )
 from .default_table import SHORT_STATES, args_set_default_table
 from .profile import ProfileReport, args_set_profile
+
+from .diagnostics import RAW_COUNTERS, MessageCoverage
 
 from .battery import QUERY_TIMEOUT_S as BATTERY_TIMEOUT_S, BatteryMonitor
 
@@ -172,6 +174,7 @@ class SessionController:
         self.frame_sink: Callable[[bytes], object] | None = None
         # Validated RAW datagrams, unchanged. No recorder or implicit storage.
         self.raw_sink: Callable[[bytes], object] | None = None
+        self.message_coverage = MessageCoverage()
         self.raw_capture_sink: Callable[[bytes, int, int | None], object] | None = None
         self._busy = False
         self._stop_requested = False
@@ -265,6 +268,8 @@ class SessionController:
         try:
             env = parse_envelope(raw)
             is_frame = env.msg_type == MSG_FRAME
+            if self.session_id and env.session_id == self.session_id:
+                self.message_coverage.observe(env.msg_sequence)
         except WireError:
             return False  # decode_reply counts it as malformed
         if is_frame:
@@ -479,6 +484,11 @@ class SessionController:
         self._observe_end(res)
         return res
 
+    def query_netdiag(self):
+        if not self.connected:
+            return self._reject("netdiag", "not connected")
+        return self._run("netdiag", OP_GET_NETDIAG, retries=0, quiet_ok=True)
+
     def refresh_config(self) -> CommandResult:
         """Read the active Fs and currents without writing either setting."""
         if not self.connected:
@@ -513,7 +523,7 @@ class SessionController:
         raw_diag = None
         if fresh_info is not None:
             raw_diag = {**reply_context(fresh_info), "source": "INFO"}
-            for field in ("raw_packets_sent", "raw_dropped_samples", "raw_buffer_highwater"):
+            for field in RAW_COUNTERS:
                 value = fresh_info.info.get(field, "")
                 raw_diag[field] = (int(value) if value.isdecimal() and len(value) <= 10
                                    and int(value) <= 0xffffffff else None)

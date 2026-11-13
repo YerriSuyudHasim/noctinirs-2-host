@@ -54,6 +54,8 @@ class Geometry:
     detectors: tuple[DetectorInfo, ...]
     sources: tuple[SourceInfo, ...]
     channels: tuple[ChannelInfo, ...]
+    calibration_short_channels: tuple[str, ...] = ()
+    exclude_unselected_short_from_safety: bool = False
 
     @property
     def is_draft(self) -> bool:
@@ -80,6 +82,17 @@ class Geometry:
             if c.source == src.id and c.pd == pd:
                 return c
         return None
+
+    def calibration_targets(self, slot: int) -> tuple[int, ...]:
+        return tuple(i for i in range(4) if (ch := self.channel_for(slot, i)) is not None
+                     and (ch.kind != "short" or not self.calibration_short_channels
+                          or ch.name in self.calibration_short_channels))
+
+    def calibration_safety_targets(self, slot: int) -> tuple[int, ...]:
+        targets = self.calibration_targets(slot)
+        if self.exclude_unselected_short_from_safety and any(self.channel_for(slot, i).kind == "short" for i in targets):
+            return tuple(i for i in range(4) if self.channel_for(slot, i) is None or i in targets)
+        return (0, 1, 2, 3)
 
     def is_contralateral(self, slot: int, ain: int) -> bool:
         """True if the detector is on the opposite side of the source (negative control)."""
@@ -167,6 +180,16 @@ def load_geometry(path: str | Path) -> Geometry:
     for s in srcs:
         if sum(1 for c in chans if c.source == s.id) != 2:
             problems.append(f"source {s.id} must have exactly 2 channels")
+    exclude_safety = g.get("exclude_unselected_short_from_safety", False)
+    if type(exclude_safety) is not bool or (exclude_safety and not g.get("calibration_short_channels")):
+        problems.append("Safety exclusion requires explicit short calibration channels")
+    short_targets = g.get("calibration_short_channels", [])
+    if (not isinstance(short_targets, list) or any(not isinstance(n, str) for n in short_targets)
+            or len(set(short_targets)) != len(short_targets)
+            or any(n not in {c.name for c in chans if c.kind == "short"} for n in short_targets)
+            or (short_targets and any(not any(c.name in short_targets for c in chans
+                if c.source == src.id) for src in srcs if any(c.kind == "short" and c.source == src.id for c in chans)))):
+        problems.append("calibration_short_channels must select short channels on every short source")
     if problems:
         raise GeometryError(problems)
-    return Geometry(sha, map_id, status, dets, srcs, chans)
+    return Geometry(sha, map_id, status, dets, srcs, chans, tuple(short_targets), exclude_safety)

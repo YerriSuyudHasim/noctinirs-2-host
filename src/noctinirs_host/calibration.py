@@ -18,12 +18,27 @@ class Assumptions:
     band_snr: float = 86 * sqrt(50)
     floor_divisor: float = 3
     quant_margin: float = 0.02
-    loss_fraction: float = 0.02
-    min_occurrences: int = 30
+    loss_fraction: float = 0.25
+    min_occurrences: int = 24
+    visit_target_occurrences: int = 31
     empirical_tie: float = 0.05
     short_interim_code: int = 67
+    empirical_target_snr: float = 20.0
+    empirical_floor_snr: float = 5.0
+    live_detector_snr: float = 5.0
+    drift_noise_multiple: float = 3.0
+    stable_repeat_count: int = 3
+    stable_repeat_spread: float = 0.10
+    off_window: str = "reported"
 
     def __post_init__(self):
+        if (not all(isfinite(x) and x > 0 for x in (self.empirical_target_snr,
+                self.empirical_floor_snr, self.live_detector_snr, self.drift_noise_multiple,
+                self.stable_repeat_spread)) or self.empirical_floor_snr > self.empirical_target_snr
+                or type(self.stable_repeat_count) is not int or not 3 <= self.stable_repeat_count <= 5
+                or type(self.visit_target_occurrences) is not int or self.visit_target_occurrences < 2
+                or self.off_window not in ("reported", "29-38")):
+            raise ValueError("Invalid empirical calibration parameters.")
         fractions = (self.adc_margin, self.downward_drift, self.loss_fraction, self.empirical_tie)
         nonnegative = (self.upward_drift, self.prediction_error, self.quant_margin)
         if (not all(0 <= x < 1 for x in fractions)
@@ -70,6 +85,7 @@ class Level:
     count: int
     excluded: tuple[str, ...] = ()
     envelope: tuple[float, ...] = ()
+    repeat_relative_spread: tuple[float, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -158,7 +174,10 @@ def level_exclusions(level, params, offsets=None):
         flags.append("CLIP_DETECTED")
     if level.count < params.min_occurrences:
         flags.append("INCOMPLETE_DATA")
-    if level.code > LEGACY_DEFAULT and level.visits < 5:
+    if level.code > LEGACY_DEFAULT and level.visits < 5 and not (
+            level.visits >= params.stable_repeat_count and level.repeat_relative_spread
+            and all(isfinite(x) and 0 <= x <= params.stable_repeat_spread
+                    for x in level.repeat_relative_spread)):
         flags.append("TIER2_ENVELOPE_INSUFFICIENT")
     corrections = offsets if offsets is not None else (0,) * len(level.mean)
     if any(p + (params.growth - 1) * max(0, x - a) > params.headroom
@@ -175,10 +194,18 @@ def empirical_choice(levels, targets, default_code, fs, params, offsets=None, *,
     corrections = offsets if offsets is not None else (0,) * len(levels[0].mean) if levels else ()
     if offsets is None:
         flags.append("A_UNCORRECTED")
-    target = params.target(fs)
+    target = params.empirical_target_snr
+    # A detector must be alive somewhere in the current safe sweep. Keep this
+    # target set fixed across codes; never cherry-pick a different PD per level.
+    live = tuple(i for i in targets if any(level.sigma[i] > 0 and
+                 (level.mean[i] - corrections[i]) / level.sigma[i] >= params.live_detector_snr
+                 for level in safe))
+    if set(live) != set(targets):
+        flags.append("LOW_QUALITY_DETECTOR")
+    targets = live
     scores = {}
     for level in safe:
-        if all(level.sigma[i] > 0 for i in targets):
+        if targets and all(level.sigma[i] > 0 for i in targets):
             values = [(level.mean[i] - corrections[i]) / level.sigma[i] for i in targets]
             worst = min(range(len(targets)), key=values.__getitem__)
             if max(values) > 5:  # Rev 2.2 c_on screen on the bright PD
@@ -191,7 +218,7 @@ def empirical_choice(levels, targets, default_code, fs, params, offsets=None, *,
         snr, detector = scores[code]
         if snr < target:
             flags.append("LOW_SIGNAL")
-        if snr < target / params.floor_divisor:
+        if snr < params.empirical_floor_snr:
             flags.append("SNR_BELOW_FLOOR")
         if code > LEGACY_DEFAULT:
             flags.append("HIGH_CURRENT_PROFILE")
@@ -199,8 +226,9 @@ def empirical_choice(levels, targets, default_code, fs, params, offsets=None, *,
 
     # Even a default needs V evidence from the current sweep. Prefer measured
     # headroom to extrapolating an unidentified model outside measured levels.
+    default_code = min(default_code, LEGACY_DEFAULT)
     if short:
-        default_code = params.short_interim_code
+        default_code = min(default_code, params.short_interim_code)
         flags.extend((f"SHORT_INTERIM_{default_code}", "ASSUMED_SHORT_DEFAULT"))
     flags.extend(("DEFAULT_TIER", "LOW_SIGNAL", "C_ON_UNVERIFIED"))
     codes = {level.code for level in safe if level.code <= default_code}

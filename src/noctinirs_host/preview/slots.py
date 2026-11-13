@@ -67,7 +67,10 @@ class SlotMeasurement:
 
 
 class SlotAssembler:
-    def __init__(self) -> None:
+    def __init__(self, off_window="reported") -> None:
+        if off_window not in ("reported", "29-38"):
+            raise ValueError("Unknown OFF window preset")
+        self.off_window = off_window
         self.reset()
 
     def reset(self) -> None:
@@ -128,6 +131,9 @@ class SlotAssembler:
                 cur.on_n += 1
                 target, squares = cur.on_sum, cur.on_sq
             elif s.phase_class == PH_OFF_STABLE:
+                position = (s.sample_sequence - cur.first_seq) & 0xffffffff
+                if self.off_window == "29-38" and (cur.partial or not 29 <= position <= 38):
+                    continue
                 cur.off_n += 1
                 target, squares = cur.off_sum, cur.off_sq
             else:

@@ -49,4 +49,8 @@ def test_filter_bank_leaves_intensity_and_other_channels_alone():
     gap = ChannelPoint("CH1", "long", "INVALID")
     assert bank.apply(dict(CH1=gap))["CH1"] is gap
     reset = bank.apply(dict(CH1=point))["CH1"]
-    assert reset.od735 == points["CH1"].od735 and bank.counts["CH1"] == 1
+    assert reset.od735 > points["CH1"].od735 and bank.counts["CH1"] == 2
+    for _ in range(51):
+        bank.apply(dict(CH1=gap))
+    restarted = bank.apply(dict(CH1=point))["CH1"]
+    assert restarted.od735 == points["CH1"].od735 and bank.counts["CH1"] == 1

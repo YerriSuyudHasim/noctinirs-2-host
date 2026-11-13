@@ -92,6 +92,7 @@ def resolve_dpf(setting: DpfSetting) -> ResolvedDpf:
 class PreviewConfig:
     extinction: ExtinctionTable = LEGACY_PREVIEW_EXTINCTION
     dpf: DpfSetting = field(default_factory=DpfSetting)
+    off_window: str = "reported"
     baseline_s: float = 10.0
     min_baseline_samples: int = 3
     ssr_mode: str = "off"
@@ -102,6 +103,8 @@ class PreviewConfig:
     filters: FilterConfig = field(default_factory=FilterConfig)
 
     def validate(self) -> None:
+        if self.off_window not in ("reported", "29-38"):
+            raise ValueError("Unknown OFF window preset")
         if self.ssr_mode not in SSR_MODES:
             raise ValueError(f"ssr_mode must be one of {SSR_MODES}")
         if self.ssr_method not in SSR_METHODS:
@@ -125,8 +128,10 @@ class PreviewConfig:
                          "min_samples": self.min_baseline_samples},
             "short_separation": {"mode": self.ssr_mode, "method": self.ssr_method,
                                  "ridge_lambda": self.ridge_lambda, "window_s": self.ssr_window_s,
-                                 "min_samples": self.ssr_min_samples, "domain": "OD", "causal": True},
+                                 "min_samples": self.ssr_min_samples, "domain": "OD", "causal": True,
+                                 "correction_lowpass_hz": .3, "cardiac_protection": True},
             "display_filters": self.filters.metadata(),
+            "off_window": self.off_window,
             "quality": dict(CONSTANTS),
             "od": "ln(baseline/I), I = mean(ON_STABLE) - mean(OFF_STABLE) of the same slot",
             "output": "change relative to baseline (delta), micromolar",

@@ -4,9 +4,10 @@ import hashlib
 import json
 import random
 import secrets
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from statistics import fmean, stdev
+from math import cos, sin, pi, sqrt
 
 from .calibration import Assumptions, LEGACY_DEFAULT, Level, empirical_choice, level_exclusions
 from .control.profile import IREF_SLOTS
@@ -66,6 +67,7 @@ class CalibrationProfile:
     profile_hash: str
     codes: tuple[int, ...]
     document: dict
+    sweep_visits: tuple = field(default=(), repr=False, compare=False)
 
     @classmethod
     def create(cls, codes, metadata, *, used_ids=None):
@@ -107,14 +109,18 @@ def canonical(obj):
 
 
 class Visit:
-    def __init__(self, profile, count, map_id):
+    def __init__(self, profile, count, map_id, off_window="reported", fs=10, boot_id=None):
         self.profile = profile
+        self.fs = fs
+        self.boot_id = boot_id
+        self.raw_records = []
+        self.raw_bytes = 0
         self.count = count
         self.map_id = map_id
         self.rows = [[] for _ in profile.codes]
         self.maximum = [[ADC_MIN] * 4 for _ in profile.codes]
         self.minimum = [[ADC_MAX] * 4 for _ in profile.codes]
-        self.assembler = SlotAssembler()
+        self.assembler = SlotAssembler(off_window)
         self.hash = hashlib.sha256()
         self.epoch = None
         self.next_sample = None
@@ -123,6 +129,11 @@ class Visit:
         self.stopped = None
 
     def feed(self, packet, wire, host_us):
+        if self.raw_bytes + len(wire) > 4 * 1024 * 1024:
+            self.flags.add("RAW_ARCHIVE_LIMIT")
+            return
+        self.raw_records.append((wire, host_us))
+        self.raw_bytes += len(wire)
         self.hash.update(wire)
         if packet.gap_before or (self.next_sample is not None and packet.first_sample_sequence != self.next_sample):
             self.flags.add("INCOMPLETE_DATA")
@@ -142,7 +153,7 @@ class Visit:
             rows = self.rows[row.slot]
             if row.gap:
                 self.flags.add("INCOMPLETE_DATA")
-            if not row.partial and row.on_n and row.off_n and len(rows) < self.count:
+            if not row.partial and not row.gap and row.on_n and row.off_n and len(rows) < self.count:
                 rows.append(row)
 
     @property
@@ -156,20 +167,79 @@ class Visit:
                     running=self.running, stopped=self.stopped)
 
 
+def usable_visit(visit, slot, params):
+    return (len(visit.rows[slot]) >= params.min_occurrences
+            and 1 - len(visit.rows[slot]) / visit.count <= params.loss_fraction)
+
+
+def spectral_noise(values, fs=10.0):
+    """Variance outside 0.8-3 Hz, normalized by retained DFT degrees of freedom.
+
+    Short contiguous blocks only; no interpolation of missing calibration data.
+    DC is excluded. This is an empirical white-noise-equivalent estimate, not ENBW.
+    """
+    n = len(values)
+    if n < 8:
+        return stdev(values) if n > 1 else 0.0
+    mean = fmean(values)
+    energy = weight = 0.0
+    for k in range(1, n // 2 + 1):
+        if .8 <= k * fs / n <= 3.0:
+            continue
+        re = sum((v - mean) * cos(2*pi*k*j/n) for j, v in enumerate(values))
+        im = sum((v - mean) * sin(2*pi*k*j/n) for j, v in enumerate(values))
+        w = 1 if 2*k == n else 2
+        energy += w * (re*re + im*im) / n
+        weight += w
+    return sqrt(energy / weight) if weight else stdev(values)
+
+
+def pooled_noise(visits, slot, ain):
+    variances = []
+    for visit in visits:
+        blocks, block, previous = [], [], None
+        for row in visit.rows[slot]:
+            if previous is not None and ((row.first_seq - previous) & 0xffffffff) != round(8000 / visit.fs):
+                blocks.append(block)
+                block = []
+            block.append(row.on_mean(ain) - row.off_mean(ain))
+            previous = row.first_seq
+        blocks.append(block)
+        for values in blocks:
+            if len(values) >= 8:
+                variances.extend([spectral_noise(values, visit.fs)**2] * len(values))
+        # Short fragments have insufficient spectral resolution. Use measured
+        # within-slot noise conservatively instead of bridging the gap.
+        if not any(len(b) >= 8 for b in blocks):
+            variances.extend(r.within_sigma(ain)**2 for r in visit.rows[slot])
+    return sqrt(fmean(variances)) if variances else 0.0
+
+
+def repeat_spread(visits, slot, ain):
+    means = [fmean(r.on_mean(ain) - r.off_mean(ain) for r in v.rows[slot]) for v in visits]
+    if not means:
+        return 1.0
+    noise = pooled_noise(visits, slot, ain)
+    return (max(means) - min(means)) / max(abs(fmean(means)), 5*noise, 1.0)
+
+
 def levels_for_slot(visits, slot, reference, targets, params):
     """Pool independent visits to the same code. Exclude a drift-affected block."""
     groups = {}
     reference_step = None
+    reference_noise = None
     previous_reference = 0
     for index, visit in enumerate(visits):
         rows = visit.rows[slot]
-        if visit.profile.codes != reference or ({"INCOMPLETE_DATA", "SWEEP_CONFIG_MISMATCH"} & visit.flags) or len(rows) < params.min_occurrences:
+        if visit.profile.codes != reference or "SWEEP_CONFIG_MISMATCH" in visit.flags or not usable_visit(visit, slot, params):
             continue
         step = [fmean(row.on_mean(i) - row.off_mean(i) for row in rows) for i in targets]
+        noise = [stdev([r.on_mean(i) - r.off_mean(i) for r in rows]) for i in targets]
         if reference_step is None:
-            reference_step = step
-        if any(abs(now - baseline) > abs(baseline) * params.prediction_error
-               for now, baseline in zip(step, reference_step)):
+            reference_step, reference_noise = step, noise
+        if any(abs(now - baseline) > max(abs(baseline) * params.prediction_error,
+               params.drift_noise_multiple * sqrt(a*a + b*b))
+               for now, baseline, a, b in zip(step, reference_step, noise, reference_noise)):
             for affected in visits[previous_reference:index + 1]:
                 affected.flags.add(f"REFERENCE_DRIFT_SLOT_{slot}")
         previous_reference = index + 1
@@ -178,20 +248,20 @@ def levels_for_slot(visits, slot, reference, targets, params):
         groups.setdefault(code, []).append(visit)
     levels = []
     for code, group in sorted(groups.items()):
-        valid = [visit for visit in group if not ({"INCOMPLETE_DATA", "SWEEP_CONFIG_MISMATCH",
+        valid = [visit for visit in group if not ({"SWEEP_CONFIG_MISMATCH",
                                                    f"REFERENCE_DRIFT_SLOT_{slot}"} & visit.flags)
-                 and len(visit.rows[slot]) >= params.min_occurrences
-                 and 1 - len(visit.rows[slot]) / visit.count <= params.loss_fraction]
+                 and usable_visit(visit, slot, params)]
         # A clipped visit is evidence against the code even if it also lost data.
         rows = [row for visit in valid for row in visit.rows[slot]]
         deltas = [[row.on_mean(i) - row.off_mean(i) for row in rows] for i in range(4)]
         levels.append(Level(
             code, tuple(fmean(x) if x else 0 for x in deltas),
-            tuple(stdev(x) if len(x) > 1 else 0 for x in deltas),
+            tuple(pooled_noise(valid, slot, i) for i in range(4)),
             tuple(max(visit.maximum[slot][i] for visit in group) for i in range(4)),
             tuple(min(visit.minimum[slot][i] for visit in group) for i in range(4)),
             len(valid), len(rows), envelope=tuple(max((fmean(r.on_mean(i) - r.off_mean(i)
                 for r in visit.rows[slot]) for visit in valid), default=0) for i in range(4)),
+            repeat_relative_spread=tuple(repeat_spread(valid, slot, i) for i in targets),
         ))
     return levels
 
@@ -206,7 +276,7 @@ def config_metadata(plan, params):
     return dict(parameters=asdict(params), sweep_grid=asdict(plan),
                 flags=["ASSUMED_REV22_PARAMETERS", "ENBW_PLACEHOLDER", "D1_ANCHOR_UNAVAILABLE",
                        "WHITENESS_UNVERIFIED", "GAIN_READBACK_UNAVAILABLE", "SPECTRAL_PROFILE_UNAVAILABLE"],
-                estimator="RAW scheduled ON_STABLE minus OFF_STABLE means",
+                estimator="RAW scheduled ON_STABLE minus configured OFF_STABLE means; noise excludes 0.8-3 Hz",
                 spectral_profile=None)
 
 class Sweep:
@@ -223,8 +293,7 @@ class Sweep:
         self.seed = secrets.randbits(32)
         self.params = run.calibration_params
         self.plan = run.sweep_plan
-        self.targets = [tuple(i for i in range(4) if run.geometry.channel_for(slot, i))
-                        for slot in range(IREF_SLOTS)]
+        self.targets = [run.geometry.calibration_targets(slot) for slot in range(IREF_SLOTS)]
         self.short_slots = {slot for slot, targets in enumerate(self.targets)
                  if any(run.geometry.channel_for(slot, i).kind == "short" for i in targets)}
         self.reference, self.order = self.plan.visits(self.short_slots, self.seed, self.params.short_interim_code)
@@ -239,6 +308,9 @@ class Sweep:
 
     def feed(self, packet, wire, host_us):
         if self.phase == "collect":
+            if sum(v.raw_bytes for v in self.visits) + len(wire) > 64 * 1024 * 1024:
+                self.visits[-1].flags.add("RAW_ARCHIVE_LIMIT")
+                return
             self.visits[-1].feed(packet, wire, host_us)
 
     def tick(self):
@@ -261,7 +333,7 @@ class Sweep:
             if run._read_defaults(report) != self.defaults:
                 raise ValueError("Default table changed during calibration.")
             run._arm_calibration_profile(profile)
-            self.visits.append(Visit(profile, self.params.min_occurrences + 1, run.geometry.geometry_map_id))
+            self.visits.append(Visit(profile, max(self.params.visit_target_occurrences, self.params.min_occurrences + 1), run.geometry.geometry_map_id, self.params.off_window, self.fs, self.boot))
             run._result(ctl.start())
             self.session = ctl.session_id
             self.phase, self.deadline = "verify application", now + 5
@@ -281,6 +353,8 @@ class Sweep:
                     self.deadline = now + visit.count / self.fs + 5
                     return
         elif self.phase == "collect":
+            if "RAW_ARCHIVE_LIMIT" in visit.flags:
+                raise ValueError("Sweep RAW archive memory limit reached; run a new calibration")
             if "SWEEP_CONFIG_MISMATCH" in visit.flags:
                 raise ValueError("RAW geometry or slot plan changed during a calibration level.")
             if ctl.session_id != self.session:
@@ -311,16 +385,28 @@ class Sweep:
             if not targets:
                 raise ValueError(f"Slot {slot} has no target detectors in the geometry map.")
             levels = levels_for_slot(self.visits, slot, self.reference, targets, self.params)
-            choice = empirical_choice(levels, targets, self.defaults["codes"][slot], self.fs, self.params,
+            safety = run.geometry.calibration_safety_targets(slot)
+            ignored = tuple(i for i in range(4) if i not in safety)
+            if ignored:
+                # Explicit board geometry exclusion; keep original evidence in the artifact.
+                evaluated = [replace(level, peak=tuple(v if i in safety else 0 for i, v in enumerate(level.peak)),
+                    minimum=tuple(v if i in safety else 0 for i, v in enumerate(level.minimum)),
+                    envelope=tuple(v if i in safety else 0 for i, v in enumerate(level.envelope))) for level in levels]
+            else:
+                evaluated = levels
+            choice = empirical_choice(evaluated, targets, self.defaults["codes"][slot], self.fs, self.params,
                                       short=slot in self.short_slots)
+            if ignored:
+                choice = replace(choice, flags=(*choice.flags, "GEOMETRY_PD_EXCLUDED"))
             if choice.code is None:
                 default_flags = ", ".join(choice.flags)
                 raise ValueError(f"Slot {slot} has no usable headroom evidence at or below its fallback code "
                                  f"({default_flags}). Check the probe and run a new sweep.")
             choices.append(choice)
-            summary.append(dict(slot=slot, targets=targets, selection=asdict(choice),
-                                levels=[dict(asdict(level), exclusions=level_exclusions(level, self.params))
-                                        for level in levels]))
+            summary.append(dict(slot=slot, targets=targets, safety_targets=safety, ignored_detectors=ignored, selection=asdict(choice),
+                                levels=[dict(asdict(level), exclusions=level_exclusions(evaluated_level, self.params),
+                                             all_detector_exclusions=level_exclusions(level, self.params))
+                                        for level, evaluated_level in zip(levels, evaluated)]))
         metadata = config_metadata(self.plan, self.params)
         metadata.update(purpose="sweep-result", fs_hz=self.fs, boot_id=self.boot, configuration=self.config,
                         geometry_sha256=run.geometry.sha256, simulated=self.ctl.simulated,
@@ -335,4 +421,43 @@ class Sweep:
         armed = run._arm_calibration_profile(profile)
         if run._read_defaults(run.controller.profile) != self.defaults:
             raise ValueError("The reported default table changed during calibration.")
-        return profile, armed
+        return replace(profile, sweep_visits=tuple(self.visits)), armed
+
+
+def save_sweep(folder, stem, visits):
+    """Called by the disk worker. Exact received datagrams, original times and gaps."""
+    from .record.raw_archive import RawArchive, MAGIC, decode_raw
+    archive = RawArchive(folder, stem + ".sweep")
+    index = []
+    with archive.path.open("xb") as fh:
+        archive.wire = fh
+        fh.write(MAGIC)
+        for number, visit in enumerate(visits):
+            offset = fh.tell()
+            first = archive.packets
+            digest = hashlib.sha256()
+            gaps = []
+            expected = None
+            for wire, host_us in visit.raw_records:
+                packet = decode_raw(wire, host_us, visit.boot_id)
+                raw = packet.raw
+                if raw.gap_before or (expected is not None and expected != raw.first_sample_sequence):
+                    gaps.append(dict(packet=archive.packets, first_sample_sequence=raw.first_sample_sequence,
+                                     expected_sequence=expected, gap_before=raw.gap_before))
+                expected = (raw.first_sample_sequence + raw.sample_count) & 0xffffffff
+                digest.update(wire)
+                archive.write_packet(packet)
+            if digest.hexdigest() != visit.hash.hexdigest():
+                raise ValueError("Sweep archive hash differs from calibration input")
+            index.append(dict(visit=number, codes=visit.profile.codes, start_packet=first,
+                              packet_count=archive.packets-first, byte_offset=offset,
+                              byte_end=fh.tell(), raw_sha256=digest.hexdigest(), gaps=gaps,
+                              counts=[len(rows) for rows in visit.rows], flags=sorted(visit.flags)))
+    digest = hashlib.sha256(archive.path.read_bytes()).hexdigest()
+    metadata = dict(schema="noctinirs.sweep-index/1", archive=archive.path.name, sha256=digest,
+                    complete=True, visits=index, raw=dict(schema="noctinirs.raw/1", archive_file=archive.path.name,
+                    archive_bytes=archive.path.stat().st_size, archive_sha256=digest))
+    path = folder / (stem + ".sweep.json")
+    with path.open("xb") as fh:
+        fh.write(canonical(metadata))
+    return dict(archive=archive.path.name, index=path.name, sha256=digest)

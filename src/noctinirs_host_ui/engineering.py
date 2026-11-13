@@ -715,6 +715,7 @@ class EngineeringWindow(QtWidgets.QMainWindow):
         cfg = FilterConfig(self.bp.isChecked(), self.bp_lo.value(), self.bp_hi.value(),
                            self.hp.isChecked(), self.lp.isChecked(), self.lp_cutoff.value(),
                            tuple(name for name, box in self.filter_channels.items() if box.isChecked()))
+        cfg = cfg.cardiac_safe(self.state.get("fs") or 10)
         try:
             cfg.validate(self.state.get("fs") or 10)
         except ValueError as exc:
@@ -836,7 +837,9 @@ class EngineeringWindow(QtWidgets.QMainWindow):
             warmup, delay, hz = timing(cfg.filters, fs, sections)
             self.filter_detail.set_text(
                 (f"{cfg.filters.label} · {len(cfg.filters.channels)} channel(s) · OD and Hb only\n"
-                 f"Warm-up ≈ {warmup:.0f} s · delay ≈ {delay:.2f} s at {hz:.3g} Hz"
+                 f"Warm-up ≈ {warmup:.0f} s · delay ≈ {delay:.2f} s at {hz:.3g} Hz\n"
+                 f"Proteksi pulsa: BP {cfg.filters.band_low:g}–{cfg.filters.band_high:g} Hz; "
+                 f"LP {cfg.filters.low_cutoff:g} Hz (batas efektif saat aktif). SCR hanya koreksi lambat ≤0.3 Hz."
                  if sections and cfg.filters.channels else "Filters off. Intensity always shows the original values."))
         self.panel.push(state.get("preview_new", ()))
         self._render()
@@ -1026,7 +1029,9 @@ class EngineeringWindow(QtWidgets.QMainWindow):
                 f"{loss.get('samples_missing', 0)} sampel ({loss.get('samples_missing_percent', 0.0):.1f} %) "
                 f"dalam {loss.get('sample_jumps', 0)} lompatan · ±{loss.get('msg_missing', 0)} pesan · "
                 f"gap_before dari perangkat: {loss.get('gap_before_packets', 0)}" if loss else "belum ada data")
-            + "\nGap yang dilaporkan perangkat tidak menangkap kehilangan di jaringan; host menghitung lompatan sendiri.")
+            + f"\nPreview tertunda {s.get('preview_delay_s', 3):g} s · gap = garis putus; tanpa interpolasi."
+            + "\nR3 counters: " + ", ".join(f"{k}={v if v is not None else 'N/A (R2)'}"
+                                          for k, v in (s.get('r3_counters') or {}).items()))
         self.profile_line.set_text((s.get("profile") or {}).get("summary", ""))
         self.recording.set_text(f"Recorder  {recorder_state}   |   {_value(s.get('recording_path'))}\n"
                                 f"Preview errors (never affect the RAW file): {s.get('preview_errors', 0)}")
@@ -1154,7 +1159,12 @@ def main(argv=None, *, run_factory=EngineeringRun, settings=None, documents=None
     parser.add_argument("--host-sha", help="Optional caller-supplied host build SHA")
     parser.add_argument("--calibration-config", type=Path,
                         help="Optional JSON overrides for calibration parameters and sweep grid")
+    parser.add_argument("--geometry", type=Path, help="Board geometry JSON including calibration exclusions")
+    parser.add_argument("--preview-delay", type=float, default=3, help="Preview reorder delay, 2–5 seconds")
     args = parser.parse_args(argv)
+    if not 2 <= args.preview_delay <= 5:
+        parser.error("--preview-delay must be 2–5 seconds")
+    run_factory = partial(run_factory, preview_delay_s=args.preview_delay)
     if args.calibration_config is not None:
         try:
             params, plan = load_configuration(args.calibration_config)
@@ -1165,7 +1175,7 @@ def main(argv=None, *, run_factory=EngineeringRun, settings=None, documents=None
         parser.error("--host-sha must contain 40 hexadecimal characters")
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([sys.argv[0]])
     app.setStyle("Fusion")      # one consistent base style under the generated style sheet
-    window = EngineeringWindow(load_geometry(geometry_path()), args.host_sha, run_factory=run_factory,
+    window = EngineeringWindow(load_geometry(args.geometry or geometry_path()), args.host_sha, run_factory=run_factory,
                                settings=settings, documents=documents)
     worker = window.worker      # keep our own reference: after the close the window object is deleted by Qt
     window.show()

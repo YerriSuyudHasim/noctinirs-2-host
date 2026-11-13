@@ -14,12 +14,12 @@ from __future__ import annotations
 
 import math
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from ..geometry import Geometry
 from ..wire.optical import RawPacket
 from . import quality as Q
-from .filters import PreviewFilters
+from .filters import PreviewFilters, CausalFilter, FilterConfig, design
 from .baseline import MedianBaseline
 from .mbll import mbll_delta
 from .od import optical_density
@@ -132,9 +132,11 @@ class PreviewPipeline:
     # ---- configuration -------------------------------------------------
     def _set_config(self, config: PreviewConfig, t_s: float, *, initial=False) -> None:
         config.validate()
+        config = replace(config, filters=config.filters.cardiac_safe(self.fs))
         old = None if initial else self.config
         self.filters = PreviewFilters(config.filters, self.fs)
         self.config = config
+        self.assembler.off_window = config.off_window
         self.dpf = resolve_dpf(config.dpf)
         if initial or (old.baseline_s, old.min_baseline_samples) != (
                 config.baseline_s, config.min_baseline_samples):
@@ -177,6 +179,7 @@ class PreviewPipeline:
     def _build_regressors(self) -> None:
         c = self.config
         self._regs: dict = {}
+        self._ssr_correction = {}
         self._reg_inputs: dict = {}
         if c.ssr_mode == "off":
             return
@@ -281,7 +284,7 @@ class PreviewPipeline:
             ambient = st.ambient_high(off)
             over_headroom = self.calibration_headroom is not None and (
                 m.maximum[a] >= self.calibration_headroom or m.minimum[a] <= -self.calibration_headroom)
-            self.headroom_exceeded |= over_headroom
+            self.headroom_exceeded |= over_headroom and a in self.geometry.calibration_safety_targets(m.slot)
             if (m.saturated[a] or on >= Q.NEAR_RAIL_FRACTION * Q.ADC_RAIL
                     or (m.flat_on(a) and on >= Q.FLAT_TOP_MIN_FRACTION * Q.ADC_RAIL)):
                 r.invalid = "SATURATED"
@@ -371,15 +374,8 @@ class PreviewPipeline:
         points = {ch.name: self._finish(ch, stage) for ch in geo.channels}
         self._count_final(points)
         complete = len(cycle) == 20
-        first_occurrence, *later_occurrences = cycle.values()
-        gap_within_cycle = any(m.gap_before for m in later_occurrences)
-        if (not complete or first_occurrence.gap_before or gap_within_cycle
-                or any(m.partial or m.gap for m in cycle.values())):
-            self.filters.reset()
-        points = self.filters.apply(points)
-        if gap_within_cycle:
-            # A mixed cycle can still contain valid pre-gap channels. Clear their filter history too.
-            self.filters.reset()
+        # Keep filter history across incomplete cycles. Missing output remains NaN.
+        points = self.filters.apply(points, t_s=t)
         return FrameResult(t, points, complete)
 
     def _count_final(self, points: dict) -> None:
@@ -416,7 +412,15 @@ class PreviewPipeline:
                 for wl in WAVELENGTHS:
                     x = tuple(stage[s][4 if wl == "735" else 5] for s in shorts)
                     reg = self._regs[(ch.name, wl)]
-                    new[wl] = reg.push(od[wl], x)
+                    corrected = reg.push(od[wl], x)
+                    if corrected is None:
+                        new[wl] = None
+                    else:
+                        # Subtract only slow correction; never subtract the pulse band.
+                        key = (ch.name, wl)
+                        if key not in self._ssr_correction:
+                            self._ssr_correction[key] = CausalFilter(design(FilterConfig(lowpass=True, low_cutoff=.3), self.fs))
+                        new[wl] = od[wl] - self._ssr_correction[key].push(od[wl] - corrected)
                     if wl == "735":
                         beta = tuple(reg.last_beta or ())
                 if new["735"] is None or new["850"] is None:

@@ -218,3 +218,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local owner recording analysis (never publish subject data).
+HOST_R3_REPORT_2026-11-13.md
+HOST_R3_REPORT_2026-11-13.md.sha256

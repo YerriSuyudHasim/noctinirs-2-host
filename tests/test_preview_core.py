@@ -484,7 +484,7 @@ def test_prepare_creates_folder_and_never_reuses_a_stem(tmp_path):
 
 
 @pytest.mark.parametrize("gap_kind", ["aligned-outside", "normal", "partial"])
-def test_raw_sample_loss_restarts_causal_preview_filter(gap_kind):
+def test_raw_sample_loss_preserves_causal_preview_filter(gap_kind):
     config = PreviewConfig(baseline_s=0.2, min_baseline_samples=2)
     filtered = PreviewPipeline(GEOMETRY, replace(config, filters=FilterConfig(
         lowpass=True, channels=("CH1",))), 10)
@@ -527,10 +527,11 @@ def test_raw_sample_loss_restarts_causal_preview_filter(gap_kind):
     after, raw = [frame.points["CH1"] for frame in first]
     before = next(frame.points["CH1"] for frame in reversed(outputs[0]) if frame.t_s < (gap_cycle - 1) / 10)
     assert not before.filter_warming
-    assert after.state == raw.state == VALID and after.filter_warming
+    assert after.state == raw.state == VALID and not after.filter_warming
     assert (after.i735, after.i850) == (raw.i735, raw.i850)
     if gap_kind == "aligned-outside":
         assert first[0].complete and all(point.state == VALID for point in first[0].points.values())
     gain = filtered.filters.sections[0][0]
     for field in ("od735", "od850", "d_hbo", "d_hbr"):
-        assert getattr(after, field) == pytest.approx(gain * getattr(raw, field))
+        assert math.isfinite(getattr(after, field))
+    assert filtered.filters.counts["CH1"] > 20

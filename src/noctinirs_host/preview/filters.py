@@ -24,6 +24,13 @@ class FilterConfig:
         if any(f >= fs / 2 for f in cutoffs):
             raise ValueError("Active filter cutoffs must be below half the optical sample rate.")
 
+    def cardiac_safe(self, fs):
+        """Effective display cutoffs retain the 1.5–1.8 Hz pulse band."""
+        if fs <= 6:
+            return replace(self, bandpass=False, lowpass=False)
+        return replace(self, band_low=min(self.band_low, .1),
+                       band_high=max(self.band_high, 3.0), low_cutoff=max(self.low_cutoff, 3.0))
+
     @property
     def label(self):
         return " + ".join(label for active, label in ((self.bandpass, "BP"),
@@ -118,13 +125,21 @@ class PreviewFilters:
         self.sections = design(config, fs)
         self.warmup_s, _, _ = timing(config, fs, self.sections)
         self.warmup_samples = ceil(self.warmup_s * fs)
+        self.fs = fs
         self.reset()
 
     def reset(self):
         self.filters = {}
         self.counts = {}
+        self.last_values = {}
+        self.last_valid = {}
+        self.last_time = None
+        self.elapsed = 0.0
 
-    def apply(self, points):
+    def apply(self, points, t_s=None):
+        self.elapsed = self.elapsed + 1 / self.fs if t_s is None else t_s
+        steps = 1 if self.last_time is None else max(1, round((self.elapsed - self.last_time) * self.fs))
+        self.last_time = self.elapsed
         if not self.sections or not self.config.channels:
             return points
         fields = ("od735", "od850", "d_hbo", "d_hbr")
@@ -132,10 +147,21 @@ class PreviewFilters:
             p = points.get(name)
             if p is None:
                 continue
-            if p.state != "VALID" and p.state != "SSR_WARMUP":
+            if self.elapsed - self.last_valid.get(name, self.elapsed) > 5.0:
                 self.filters.pop(name, None)
                 self.counts.pop(name, None)
+                self.last_values.pop(name, None)
+            if name in self.filters:
+                for _ in range(min(steps - 1, round(5 * self.fs))):
+                    for f, v in zip(self.filters[name], self.last_values[name]):
+                        f.push(v)
+            if p.state != "VALID" and p.state != "SSR_WARMUP":
+                if name in self.filters:
+                    for f, v in zip(self.filters[name], self.last_values[name]):
+                        f.push(v)
                 continue
+            self.last_valid[name] = self.elapsed
+            self.last_values[name] = tuple(getattr(p, field) for field in fields)
             if name not in self.filters:
                 self.filters[name] = [CausalFilter(self.sections) for _ in fields]
                 self.counts[name] = 0

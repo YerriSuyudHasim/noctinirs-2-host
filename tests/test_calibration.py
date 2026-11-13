@@ -294,8 +294,10 @@ def sweep_visit(run, slot, code, signal):
                     "partial": 2, "lost": 2}[strength] + 2 * occurrence
             peak = int(run.calibration_params.headroom - 10) if strength == "over-v" else 2000 + step
             add(PH_ON_STABLE, index, peak)
+            add(PH_ON_STABLE, index, peak - 2)
             if not (strength == "partial" and occurrence == 1):
                 add(PH_OFF_STABLE, index, peak - step)
+                add(PH_OFF_STABLE, index, peak - step + 2)
     add(PH_OUTSIDE, RAW_SLOT_NONE, 2000)
 
     # Simulate a lost sample at a packet boundary while keeping the slot labels.
@@ -323,7 +325,7 @@ def sweep_visit(run, slot, code, signal):
                  id="G-high-code-with-tier2-evidence"),
     pytest.param(False, [(133, 1, "weak"), (222, 5, "weak")], 133, 3, "DEFAULT_TIER",
                  id="H-safe-default"),
-    pytest.param(False, [(67, 1, "weak"), (133, 1, "lost")], 67, 3, "INCOMPLETE_DATA",
+    pytest.param(False, [(67, 1, "weak"), (133, 1, "lost")], 133, 3, "DEFAULT_TIER",
                  id="packet-loss-and-low-snr-without-high-candidates"),
 ])
 def test_sweep_finish_selects_and_arms_only_valid_profiles(short, levels, expected, tier, flag):

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 import json
 from pathlib import Path
@@ -23,6 +23,8 @@ from .control.udp import UDPTransport
 from .geometry import Geometry
 from .preview.params import PreviewConfig
 from .preview.pipeline import PreviewPipeline
+from .preview.jitter import PreviewJitterBuffer, signed_delta
+from .control.diagnostics import counters as diagnostic_counters, loss_summary
 from .record.continuity import RawContinuity
 from .record.writer import Recorder
 from .wire.envelope import parse_envelope
@@ -117,7 +119,7 @@ class RecordingTarget:
     def check(self) -> None:
         if not self.folder.is_dir():
             raise ValueError("Choose an existing recording folder.")
-        for suffix in (".json", ".csv", ".raw.bin", ".raw.csv", ".iref-v1.json"):
+        for suffix in (".json", ".csv", ".raw.bin", ".raw.csv", ".iref-v1.json", ".sweep.raw.bin", ".sweep.json"):
             path = self.folder / (self.name + suffix)
             if path.exists() or path.is_symlink():
                 raise FileExistsError(f"{path.name} exists. Choose a new stem.")
@@ -129,7 +131,7 @@ class EngineeringRun:
     def __init__(self, geometry: Geometry, host_sha: str | None = None, *,
                  controller_factory=SessionController, recorder_factory=Recorder,
                  fake_options: dict | None = None, calibration_params=None, sweep_plan=None,
-                 wifi=None, udp_factory=UDPTransport) -> None:
+                 wifi=None, udp_factory=UDPTransport, preview_delay_s=3.0) -> None:
         self.geometry = geometry
         self.wifi = wifi if wifi is not None else WindowsWifi()
         self._udp_factory = udp_factory
@@ -150,7 +152,12 @@ class EngineeringRun:
         self._recording_running_evidence = None
         self._pre_apply_raw = []
         self._pre_apply_overflow = False
-        self.preview_config = PreviewConfig()
+        self.preview_delay_s = preview_delay_s
+        self.jitter = PreviewJitterBuffer(preview_delay_s)
+        self._sample_clock = None
+        self._recording_before = None
+        self._last_netdiag = {}
+        self.preview_config = PreviewConfig(off_window=self.calibration_params.off_window)
         self.preview: PreviewPipeline | None = None
         self.preview_active = False
         self.preview_errors = 0
@@ -273,6 +280,7 @@ class EngineeringRun:
         self._recording_calibration = None
         self._pre_apply_raw.clear()
         self.endpoint = endpoint
+        self._last_netdiag = {}
         self.configured = False
         self.raw = RawContinuity()
         self.latest_raw = {}
@@ -464,6 +472,21 @@ class EngineeringRun:
                 raise ValueError("Nominal optical Fs changed. Apply configuration again.")
         return self.context
 
+    def _netdiag_snapshot(self):
+        ctl = self.controller
+        if not self.connected or ctl.start_uncertain:
+            return {"available": False, "reason": "link unavailable or START unresolved"}
+        result = ctl.query_netdiag()
+        reply = result.reply
+        if not result.ok or reply is None or reply.boot_id != ctl.boot_id:
+            return {"available": False, "reason": result.status}
+        self._last_netdiag = dict(available=reply.info.get("v4netdiag") == "1", boot_id=reply.boot_id,
+                    session_id=reply.session_id, device_reply_us=reply.device_us,
+                    counters=diagnostic_counters(reply.info),
+                    fields={k: v for k, v in reply.info.items() if k in ("v4netdiag", "raw_tx_policy", "raw_resend")
+                            or (k.startswith(("raw_", "frame_", "heap_", "net_", "largest_free_")) and v.lstrip("-").isdecimal())})
+        return self._last_netdiag
+
     def diagnostics(self) -> None:
         if not self.stopped:
             raise ValueError("Refresh firmware diagnostics while STOPPED.")
@@ -485,7 +508,8 @@ class EngineeringRun:
         calibration = dict(profile_id=profile.profile_id, profile_hash=profile.profile_hash,
                            profile=profile.document, sweep_profile_id=sweep.profile_id,
                            sweep_profile_hash=sweep.profile_hash, sweep_armed_readback=self.calibration_armed)
-        context = {**context, "calibration": calibration}
+        context = {**context, "calibration": calibration, "netdiag": self._netdiag_snapshot()}
+        self._recording_before = context
         self.recorder = self._recorder_factory(
             target.folder, self.geometry, name=target.name, record_raw=True,
             simulated=ctl.simulated, host_sha=self.host_sha, firmware_sha=target.firmware_sha,
@@ -500,10 +524,10 @@ class EngineeringRun:
         self.recording_used = False
         self.recorder_state = "OPENING"
         self.checked_target = None  # Recorder exclusively creates the files; check again for reuse.
-        self._job = self._disk.submit(self._open_calibrated_recorder, self.recorder, context)
+        self._job = self._disk.submit(self._open_calibrated_recorder, self.recorder, context, sweep.sweep_visits)
 
     @staticmethod
-    def _open_calibrated_recorder(recorder, context):
+    def _open_calibrated_recorder(recorder, context, sweep_visits=()):
         calibration = context["calibration"]
         path = recorder.folder / f"{recorder.stem}.iref-v1.json"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -516,6 +540,9 @@ class EngineeringRun:
                 path.unlink(missing_ok=True)
                 raise
         try:
+            if sweep_visits:
+                from .calibration_sweep import save_sweep
+                context["calibration"]["sweep_archive"] = save_sweep(recorder.folder, recorder.stem, sweep_visits)
             recorder.start(raw_context=context)
         except (ValueError, OSError):
             path.unlink(missing_ok=True)
@@ -574,6 +601,9 @@ class EngineeringRun:
         self.raw = RawContinuity()
         self.latest_raw = {}
         self._end_preview("new START")
+        self.jitter = PreviewJitterBuffer(self.preview_delay_s)
+        self._sample_clock = None
+        self.controller.message_coverage.reset()
         self.preview_epoch += 1
         self._preview_gap_sent = False
         self.preview = PreviewPipeline(self.geometry, self.preview_config,
@@ -885,9 +915,15 @@ class EngineeringRun:
                 "running": self._recording_running_evidence, "stop_observation": stop,
                 "generation_verified": False,
                 "headroom_exceeded": self._clip_reported, "pre_apply_overflow": self._pre_apply_overflow}}
+        context = {**(context or {}), "netdiag": self._netdiag_snapshot()}
+        context["loss_summary"] = loss_summary(self._recording_before, context,
+                                                ctl.message_coverage.snapshot())
         self.recorder_state = "FINALIZING"
         self._end_preview("recording finalized")
         provenance = self.preview.provenance() if self.preview is not None else None
+        if provenance is not None:
+            provenance["jitter"] = dict(delay_s=self.preview_delay_s, interpolation_max_s=0,
+                                        counters=dict(self.jitter.counts), timebase="ADC sequence / 8000")
         self._job = self._disk.submit(self._stop_recorder, self.recorder, context, provenance)
 
     @staticmethod
@@ -908,6 +944,8 @@ class EngineeringRun:
         config.validate()
         fs = self.controller.settings.fs_hz if self.connected else None
         config.filters.validate(fs or 10)
+        config = replace(config, off_window=self.calibration_params.off_window,
+                         filters=config.filters.cardiac_safe(self.controller.settings.fs_hz if self.controller else 10))
         old_filters = self.preview_config.filters
         if self.preview is not None:
             self.preview.configure(config)
@@ -932,7 +970,13 @@ class EngineeringRun:
         if self.preview is None:
             return
         try:
-            self._preview_out.extend(self.preview.feed(raw, host_us, msg_sequence))
+            # Headroom warning must not wait for the display queue.
+            if self._recording_calibration is not None:
+                self.preview.headroom_exceeded |= any(abs(v) >= self.calibration_params.headroom
+                    for sample in raw.samples if 0 <= sample.slot_index < 20
+                    for i, v in enumerate(sample.ain)
+                    if i in self.geometry.calibration_safety_targets(sample.slot_index))
+            self._preview_release(self.jitter.push(raw, host_us, msg_sequence))
             if self._recording_calibration is not None and self.preview.headroom_exceeded and not self._clip_reported:
                 self._clip_reported = True
                 warning = "Calibration headroom exceeded. Check room light and probe fit, then Stop and run a new sweep."
@@ -942,11 +986,22 @@ class EngineeringRun:
         except Exception:  # preview faults must not disturb capture or recording
             self.preview_errors += 1
 
+    def _preview_release(self, packets):
+        for packet, host_us, msg_sequence in packets:
+            if self._sample_clock is None:
+                self._sample_clock = (packet.first_sample_sequence, host_us)
+            seq, start_us = self._sample_clock
+            # ADC clock supplies display time; arrival jitter is not signal time.
+            timestamp = start_us + round(signed_delta(packet.first_sample_sequence, seq) * 1e6 / 8000)
+            self._preview_out.extend(self.preview.feed(packet, timestamp, msg_sequence))
+            self._sample_clock = (packet.first_sample_sequence, timestamp)
+
     def _preview_gap(self, reason: str) -> None:
         if self.preview is None or self._preview_gap_sent:
             return
         self._preview_gap_sent = True  # one gap marker per run of the preview, clean or not
         try:
+            self._preview_release(self.jitter.drain(0, flush=True))
             marker = self.preview.note_gap(reason)
             self._preview_out.extend(self.preview.pending)
             if marker is not None:
@@ -957,6 +1012,7 @@ class EngineeringRun:
     def _end_preview(self, reason: str) -> None:
         if self.preview is not None and self.preview_active:
             try:
+                self._preview_release(self.jitter.drain(0, flush=True))
                 self._preview_out.extend(self.preview.flush())
             except Exception:
                 self.preview_errors += 1
@@ -1142,6 +1198,8 @@ class EngineeringRun:
             for line in ctl.battery_log:  # session log only; never the recording sidecar
                 self._event(line)
             ctl.battery_log.clear()
+        if self.preview_active:
+            self._preview_release(self.jitter.drain(time.time_ns() // 1000))
         if self.preview_active and self.stopped:
             self._end_preview("session ended")
         self._deferred_follow()
@@ -1253,6 +1311,9 @@ class EngineeringRun:
             "log": tuple(self.log),
             "battery": self._battery_view(),
             "profile": self._profile_state_view(),
+            "preview_delay_s": self.preview_delay_s, "preview_jitter": dict(self.jitter.counts),
+            "r3_counters": {**diagnostic_counters((self.context.get("observed_info") or {}).get("fields", {})),
+                            **{k: v for k, v in self._last_netdiag.get("counters", {}).items() if v is not None}},
             "preview_new": self._drain_preview(), "preview_errors": self.preview_errors,
             "preview_loss": self.preview.loss_stats() if self.preview is not None else {},
             "preview_active": self.preview_active, "preview_epoch": self.preview_epoch,

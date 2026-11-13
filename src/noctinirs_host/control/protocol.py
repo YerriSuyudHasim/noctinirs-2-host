@@ -46,6 +46,7 @@ OP_CLEAR_FAULT = 0x0021
 OP_SET_FS = 0x0100
 OP_SET_LED_CURRENT = 0x0101
 OP_SET_MODE = 0x0102  # one byte: 0 ACQ, 1 ENGINEERING; STOPPED only
+OP_GET_NETDIAG = 0x0032  # firmware R3 b11ada2; ADR-0004, existing V4 diagnostic command
 OP_GET_BATTERY = 0x0033  # no arguments; read-only; any session id; never refreshes a lease
 # LED IREF calibration profile (firmware Calib Stage-1 FIX1; pins and format in control/profile.py).
 OP_GET_PROFILE = 0x0034  # no arguments; read-only; ASCII key=value report; any peer, like get_config
@@ -61,7 +62,7 @@ OPCODE_NAMES = {
     OP_SET_FS: "set_fs", OP_SET_LED_CURRENT: "set_led_current", OP_SET_MODE: "set_mode",
     OP_GET_BATTERY: "get_battery", OP_GET_PROFILE: "get_profile", OP_SET_PROFILE: "set_profile",
     OP_CLEAR_PROFILE: "clear_profile", OP_SET_DEFAULT_TABLE: "set_default_table",
-    OP_GET_DEFAULT_TABLE: "get_default_table",
+    OP_GET_DEFAULT_TABLE: "get_default_table", OP_GET_NETDIAG: "get_netdiag",
 }
 TIMED_OPS = (OP_HEARTBEAT, OP_STATUS, OP_GET_TIME)  # carry an opaque u64 host timestamp
 MUTATING_OPS = (OP_START, OP_STOP, OP_CLEAR_FAULT, OP_SET_FS, OP_SET_LED_CURRENT, OP_SET_MODE,
@@ -289,6 +290,19 @@ def decode_reply(datagram: bytes) -> Reply:
         except UnicodeDecodeError as exc:
             raise WireError("reply_ext", "INFO is not ASCII") from exc
         kw["info"] = parse_info(text)
+    elif opcode == OP_GET_NETDIAG:
+        try:
+            fields = {}
+            for token in ext.decode("ascii").split():
+                key, value = token.split("=", 1)
+                if not key or key in fields:
+                    raise ValueError("duplicate diagnostic key")
+                fields[key] = value
+            if fields.get("v4netdiag") not in ("0", "1"):
+                raise ValueError("netdiag version")
+            kw["info"] = fields
+        except (UnicodeError, ValueError) as exc:
+            raise WireError("reply_ext", "invalid netdiag") from exc
     elif opcode == OP_GET_CONFIG:
         if len(ext) != 42 or ext[1] != LED_CHANNELS:
             raise WireError("reply_ext", "get_config length")
