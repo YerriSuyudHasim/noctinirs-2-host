@@ -133,6 +133,7 @@ class EngineeringRun:
                  fake_options: dict | None = None, calibration_params=None, sweep_plan=None,
                  wifi=None, udp_factory=UDPTransport, preview_delay_s=3.0) -> None:
         self.geometry = geometry
+        self._calibration_safety = tuple(geometry.calibration_safety_targets(slot) for slot in range(20))
         self.wifi = wifi if wifi is not None else WindowsWifi()
         self._udp_factory = udp_factory
         self.access_points = ()
@@ -975,7 +976,7 @@ class EngineeringRun:
                 self.preview.headroom_exceeded |= any(abs(v) >= self.calibration_params.headroom
                     for sample in raw.samples if 0 <= sample.slot_index < 20
                     for i, v in enumerate(sample.ain)
-                    if i in self.geometry.calibration_safety_targets(sample.slot_index))
+                    if i in self._calibration_safety[sample.slot_index])
             self._preview_release(self.jitter.push(raw, host_us, msg_sequence))
             if self._recording_calibration is not None and self.preview.headroom_exceeded and not self._clip_reported:
                 self._clip_reported = True

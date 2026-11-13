@@ -105,6 +105,7 @@ class PreviewPipeline:
     def __init__(self, geometry: Geometry, config: PreviewConfig | None = None,
                  nominal_fs_hz: float = 10.0, *, calibration_headroom: float | None = None) -> None:
         self.geometry = geometry
+        self._calibration_safety = tuple(geometry.calibration_safety_targets(slot) for slot in range(20))
         self.fs = float(nominal_fs_hz)
         self.calibration_headroom = calibration_headroom
         self.headroom_exceeded = False
@@ -284,7 +285,7 @@ class PreviewPipeline:
             ambient = st.ambient_high(off)
             over_headroom = self.calibration_headroom is not None and (
                 m.maximum[a] >= self.calibration_headroom or m.minimum[a] <= -self.calibration_headroom)
-            self.headroom_exceeded |= over_headroom and a in self.geometry.calibration_safety_targets(m.slot)
+            self.headroom_exceeded |= over_headroom and a in self._calibration_safety[m.slot]
             if (m.saturated[a] or on >= Q.NEAR_RAIL_FRACTION * Q.ADC_RAIL
                     or (m.flat_on(a) and on >= Q.FLAT_TOP_MIN_FRACTION * Q.ADC_RAIL)):
                 r.invalid = "SATURATED"
