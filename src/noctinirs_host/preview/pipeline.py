@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import math
 from collections import Counter
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 from ..geometry import Geometry
 from ..wire.optical import RawPacket
@@ -25,6 +25,8 @@ from .mbll import mbll_delta
 from .od import optical_density
 from .params import WAVELENGTHS, PreviewConfig, resolve_dpf
 from .shortsep import RollingRegressor
+from .signal_quality import (ACHROMATIC, ChannelMonitor, ChannelQuality, MotionDetector, TIER_NA,
+                             tier_for)
 from .slots import SlotAssembler, SlotMeasurement
 
 NAN = float("nan")
@@ -54,6 +56,12 @@ class ChannelPoint:
     sigma735: float = NAN
     sigma850: float = NAN
     filter_warming: bool = False
+    # Quality indicators (flag-only; see signal_quality.py). None = not assessable.
+    sci: float | None = None
+    cardiac_db: float | None = None
+    r_hbo_hbr: float | None = None
+    tier: str = TIER_NA
+    motion_z: float | None = None
 
     @property
     def has_hb(self) -> bool:
@@ -74,6 +82,7 @@ class FrameResult:
     points: dict
     complete: bool
     gap_marker: str = ""  # non-empty: a deliberate gap (disconnect, link loss)
+    motion: dict = field(default_factory=dict)   # hemisphere ("L"/"R") -> True while a motion marker is active
 
 
 @dataclass
@@ -122,6 +131,8 @@ class PreviewPipeline:
         self.invalid_counts: dict = {}
         self.invalid_reasons: dict = {}
         self.warning_counts: dict = {}
+        self.ignored_pd_clipped: Counter = Counter()   # (slot, ain) -> occurrences at/over the headroom (M5)
+        self.ssr_log: dict = {}
         self.uncorrected_counts: dict = {}
         self._stats: dict = {}
         self._loss = dict(packets=0, samples_seen=0, samples_missing=0, sample_jumps=0,
@@ -129,6 +140,7 @@ class PreviewPipeline:
         self._next_sample: int | None = None
         self._last_msg: int | None = None
         self._set_config(config or PreviewConfig(), 0.0, initial=True)
+        self._build_quality()
 
     # ---- configuration -------------------------------------------------
     def _set_config(self, config: PreviewConfig, t_s: float, *, initial=False) -> None:
@@ -143,10 +155,12 @@ class PreviewPipeline:
                 config.baseline_s, config.min_baseline_samples):
             self._reset_baselines(t_s, "initial" if initial else "baseline setting changed")
         if initial or (old.ssr_mode, old.ssr_method, old.ridge_lambda, old.ssr_window_s,
-                       old.ssr_min_samples) != (config.ssr_mode, config.ssr_method,
+                       old.ssr_min_samples, old.ssr_correction_lowpass_hz) != (config.ssr_mode, config.ssr_method,
                                                 config.ridge_lambda, config.ssr_window_s,
-                                                config.ssr_min_samples):
+                                                config.ssr_min_samples, config.ssr_correction_lowpass_hz):
             self._build_regressors()
+        if not initial and (old.quality != config.quality or old.dpf != config.dpf or old.extinction != config.extinction):
+            self._build_quality()
         self.config_log.append({"t_s": t_s, "config": config.to_metadata()})
 
     def configure(self, config: PreviewConfig) -> None:
@@ -165,17 +179,34 @@ class PreviewPipeline:
         self._reset_baselines(getattr(self, "_last_t", 0.0), reason)
         self._build_regressors()
 
+    def _pd_side(self, ch) -> str:
+        return next(d.side for d in self.geometry.detectors if d.pd == ch.pd)
+
+    def _build_quality(self) -> None:
+        cfg = self.config.quality
+        self._monitors = {}
+        for ch in self.geometry.channels:
+            self._monitors[ch.name] = ChannelMonitor(self.fs, cfg, self._hb_fn(ch))
+        sides = {"L": [], "R": []}
+        for ch in self.geometry.channels:
+            sides[self._pd_side(ch)].append(ch.name)
+        self._motion = MotionDetector({k: v for k, v in sides.items() if v}, cfg)
+        self._quality: dict = {}
+
+    def _hb_fn(self, ch):
+        def fn(a, b):
+            hb = mbll_delta(a, b, ch.sd_mm, self.dpf, self.config.extinction)
+            return hb.d_hbo_uM, hb.d_hbr_uM
+        return fn
+
     def _short_for(self, ch) -> list:
-        """Short channels (names) of the same hemisphere as the long channel's source."""
-        side = {s.id: s.side for s in self.geometry.sources}[ch.source]
-        want = {"5mm": [5.0], "8mm": [8.0], "both": [5.0, 8.0]}.get(self.config.ssr_mode, [])
-        out = []
-        for mm in want:
-            for c in self.geometry.channels:
-                if (c.kind == "short" and abs(c.sd_mm - mm) < 0.5
-                        and {s.id: s.side for s in self.geometry.sources}[c.source] == side):
-                    out.append(c.name)
-        return out
+        """Short channels (names) for a long channel: same hemisphere as the long channel's PD
+        (left PD -> left short, right PD -> right short), 5 mm only. Not chosen by source side."""
+        if self.config.ssr_mode != "5mm":
+            return []
+        side = self._pd_side(ch)
+        return [c.name for c in self.geometry.channels
+                if c.kind == "short" and abs(c.sd_mm - 5.0) < 0.5 and self._pd_side(c) == side]
 
     def _build_regressors(self) -> None:
         c = self.config
@@ -194,7 +225,8 @@ class PreviewPipeline:
             self._reg_inputs[ch.name] = shorts
             for wl in WAVELENGTHS:
                 self._regs[(ch.name, wl)] = RollingRegressor(
-                    len(shorts), window, c.ssr_min_samples, c.ssr_method, c.ridge_lambda)
+                    len(shorts), window, c.ssr_min_samples, c.ssr_method, c.ridge_lambda,
+                    window_s=c.ssr_window_s)
 
     # ---- input ---------------------------------------------------------
     def _count_loss(self, packet: RawPacket, msg_sequence: int | None) -> None:
@@ -286,6 +318,8 @@ class PreviewPipeline:
             over_headroom = self.calibration_headroom is not None and (
                 m.maximum[a] >= self.calibration_headroom or m.minimum[a] <= -self.calibration_headroom)
             self.headroom_exceeded |= over_headroom and a in self._calibration_safety[m.slot]
+            if over_headroom and a not in self._calibration_safety[m.slot]:
+                self.ignored_pd_clipped[(m.slot, a)] += 1   # M5: recorded, never changes the verdict
             if (m.saturated[a] or on >= Q.NEAR_RAIL_FRACTION * Q.ADC_RAIL
                     or (m.flat_on(a) and on >= Q.FLAT_TOP_MIN_FRACTION * Q.ADC_RAIL)):
                 r.invalid = "SATURATED"
@@ -372,12 +406,52 @@ class PreviewPipeline:
             stage[ch.name] = (VALID, "", vals["735"], vals["850"],
                               optical_density(vals["735"], b[0].value),
                               optical_density(vals["850"], b[1].value), warns, sig["735"], sig["850"])
-        points = {ch.name: self._finish(ch, stage) for ch in geo.channels}
+        self._assess_quality(t, stage)
+        points = {ch.name: self._finish(ch, stage, t) for ch in geo.channels}
         self._count_final(points)
         complete = len(cycle) == 20
         # Keep filter history across incomplete cycles. Missing output remains NaN.
         points = self.filters.apply(points, t_s=t)
-        return FrameResult(t, points, complete)
+        return FrameResult(t, points, complete, motion=dict(self._motion.active))
+
+    def _assess_quality(self, t: float, stage: dict) -> None:
+        """Contact/cardiac/achromatic indicators and hemisphere motion markers (flags only)."""
+        self._quality = {}
+        z = {}
+        for ch in self.geometry.channels:
+            st = stage[ch.name]
+            if st[0] != VALID:
+                continue
+            snr = [i / s if s and s > 0 else NAN for i, s in ((st[2], st[7]), (st[3], st[8]))]
+            q = self._monitors[ch.name].push(t, st[4], st[5], snr[0], snr[1])
+            finite = all(math.isfinite(x) for x in snr)
+            self._quality[ch.name] = (q, min(snr) if finite else None, snr[0], snr[1])
+            z[ch.name] = q.motion_z
+        self._motion.update(t, z)
+
+    def _short_gate(self, long_ch, shorts, stage) -> list:
+        """[(short name, reason)] for shorts that must not be used as regressor. Empty = all usable."""
+        cfg, bad = self.config, []
+        for name in shorts:
+            st = stage[name]
+            q, snr, *_ = self._quality.get(name, (None, None))
+            side = self._pd_side(next(c for c in self.geometry.channels if c.name == name))
+            if st[0] != VALID:
+                why = _reason_code(st[1]) if st[0] == INVALID else st[0]
+            elif LOW_SIGNAL in st[6]:
+                why = LOW_SIGNAL
+            elif LEAK_WARN in st[6]:
+                why = LEAK_WARN
+            elif snr is None or snr < cfg.ssr_min_snr:
+                why = "SNR_FRAME_LOW"
+            elif cfg.ssr_gate_achromatic and q is not None and ACHROMATIC in q.flags:
+                why = ACHROMATIC
+            elif cfg.ssr_gate_motion and self._motion.active.get(side):
+                why = "MOTION"
+            else:
+                continue
+            bad.append((name, why))
+        return bad
 
     def _count_final(self, points: dict) -> None:
         """Counts after SSR and MBLL, so every reason that hides or flags a channel is included."""
@@ -391,7 +465,7 @@ class PreviewPipeline:
                 if p.ssr_state == SSR_UNCORRECTED:
                     self.uncorrected_counts[name] = self.uncorrected_counts.get(name, 0) + 1
 
-    def _finish(self, ch, stage: dict) -> ChannelPoint:
+    def _finish(self, ch, stage: dict, t: float = 0.0) -> ChannelPoint:
         state, reason, i1, i2, o1, o2, warns, s1, s2 = stage[ch.name]
         common = dict(warnings=warns, sigma735=s1, sigma850=s2)
         if state != VALID:
@@ -400,41 +474,56 @@ class PreviewPipeline:
         applied, beta, ssr_state, ssr_reason = False, (), SSR_OFF, ""
         if self.config.ssr_mode != "off" and ch.kind == "long":
             shorts = self._reg_inputs.get(ch.name)
-            # A weak short channel (I < 3 sigma) is as unusable as a regressor as an invalid one.
-            bad = [s for s in (shorts or ()) if stage[s][0] != VALID or LOW_SIGNAL in stage[s][6]]
+            # A short that fails the quality gate is not used; the long channel stays uncorrected.
+            bad = self._short_gate(ch, shorts, stage) if shorts else []
+            log = self.ssr_log.setdefault(ch.name, dict(shorts=list(shorts or ()), applied=0,
+                                                        not_applied=Counter(), last_beta={}))
             if not shorts:
-                ssr_state, ssr_reason = SSR_UNCORRECTED, "no short channel in the geometry"
+                ssr_state, ssr_reason = SSR_UNCORRECTED, "SSR tidak diterapkan: tidak ada short 5 mm di hemisfer ini"
+                log["not_applied"]["NO_SHORT_IN_HEMISPHERE"] += 1
             elif bad:
                 ssr_state = SSR_UNCORRECTED
-                ssr_reason = "short channel " + ", ".join(
-                    f"{s} {stage[s][0] if stage[s][0] != VALID else LOW_SIGNAL}" for s in bad)
+                ssr_reason = "SSR tidak diterapkan: short " + ", ".join(f"{s} {why}" for s, why in bad)
+                for _, why in bad:
+                    log["not_applied"][why] += 1
             else:
                 new = {}
                 for wl in WAVELENGTHS:
                     x = tuple(stage[s][4 if wl == "735" else 5] for s in shorts)
                     reg = self._regs[(ch.name, wl)]
-                    corrected = reg.push(od[wl], x)
+                    corrected = reg.push(od[wl], x, t)
                     if corrected is None:
                         new[wl] = None
                     else:
                         # Subtract only slow correction; never subtract the pulse band.
                         key = (ch.name, wl)
                         if key not in self._ssr_correction:
-                            self._ssr_correction[key] = CausalFilter(design(FilterConfig(lowpass=True, low_cutoff=.3), self.fs))
+                            self._ssr_correction[key] = CausalFilter(design(FilterConfig(lowpass=True, low_cutoff=self.config.ssr_correction_lowpass_hz), self.fs))
                         new[wl] = od[wl] - self._ssr_correction[key].push(od[wl] - corrected)
                     if wl == "735":
                         beta = tuple(reg.last_beta or ())
                 if new["735"] is None or new["850"] is None:
-                    ssr_state, ssr_reason = SSR_UNCORRECTED, "short-separation regression warming up"
+                    ssr_state, ssr_reason = SSR_UNCORRECTED, "SSR tidak diterapkan: regresi short sedang warming up"
+                    log["not_applied"]["WARMING_UP"] += 1
                 else:
                     od, applied, ssr_state = new, True, SSR_APPLIED
+                    log["applied"] += 1
+                    log["last_beta"] = {wl: list(self._regs[(ch.name, wl)].last_beta or ()) for wl in WAVELENGTHS}
         try:
             hb = mbll_delta(od["735"], od["850"], ch.sd_mm, self.dpf, self.config.extinction)
         except ValueError as exc:
             return ChannelPoint(ch.name, ch.kind, INVALID, f"MBLL: {exc}", i1, i2, o1, o2, **common)
+        qinfo = self._quality.get(ch.name)
+        extra = {}
+        if qinfo is not None:
+            q, snr_min = qinfo[0], qinfo[1]
+            extra = dict(sci=q.sci, cardiac_db=q.cardiac_db, r_hbo_hbr=q.r_hbo_hbr, motion_z=q.motion_z,
+                         tier=tier_for(snr_min, q, self.config.quality))
+            if ACHROMATIC in q.flags:   # warning only: the channel is shown, never removed automatically
+                common = dict(common, warnings=tuple(dict.fromkeys((*common["warnings"], ACHROMATIC))))
         return ChannelPoint(ch.name, ch.kind, VALID, "", i1, i2, od["735"], od["850"],
                             hb.d_hbo_uM, hb.d_hbr_uM, hb.d_hbt_uM, applied, beta,
-                            ssr_state=ssr_state, ssr_reason=ssr_reason, **common)
+                            ssr_state=ssr_state, ssr_reason=ssr_reason, **common, **extra)
 
     # ---- provenance ----------------------------------------------------
     def provenance(self) -> dict:
@@ -454,6 +543,14 @@ class PreviewPipeline:
             "uncorrected_frame_counts": dict(self.uncorrected_counts),
             "loss": self.loss_stats(),
             "quality_constants": dict(Q.CONSTANTS),
+            "signal_quality": {"config": self.config.quality.to_metadata(),
+                               "motion": self._motion.summary(),
+                               "names": {"SNR_frame": "I/sigma per 10 Hz frame (ON-OFF counts)",
+                                         "SNR_cal": "calibration step / spectral sigma (calibration only)"}},
+            "short_separation": {k: dict(shorts=v["shorts"], applied_frames=v["applied"],
+                                         not_applied_reasons=dict(v["not_applied"]), last_beta=v["last_beta"])
+                                 for k, v in sorted(self.ssr_log.items())},
+            "ignored_pd_clipped": {f"slot{slot}_ain{ain}": n for (slot, ain), n in sorted(self.ignored_pd_clipped.items())},
             "noise_sigma_counts": {f"slot{slot}_ain{ain}": round(st.last_sigma, 3)
                                    for (slot, ain), st in sorted(self._stats.items())
                                    if st.last_sigma is not None},

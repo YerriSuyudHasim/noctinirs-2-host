@@ -8,10 +8,13 @@ from dataclasses import dataclass, field
 from .filters import FilterConfig
 from .dpf import scholkmann_wolf_dpf
 from .quality import CONSTANTS
+from .signal_quality import QualityConfig
 
 UNVERIFIED = "unverified"
 WAVELENGTHS = ("735", "850")  # nominal labels only; real LED wavelengths are not verified (D7)
-SSR_MODES = ("off", "5mm", "8mm", "both")
+# Board 1 (Owner decision 2026-11-13): the "8 mm" PD is ~3 mm from L1/L6 and its foam is peeled, so it
+# carries leak light. It is no longer offered as a regressor. Long channels may still use both PDs.
+SSR_MODES = ("off", "5mm")
 SSR_METHODS = ("auto", "ols", "ridge")
 
 
@@ -100,6 +103,12 @@ class PreviewConfig:
     ridge_lambda: float = 1e-3
     ssr_window_s: float = 30.0
     ssr_min_samples: int = 30
+    # Short-channel quality gate (a failing short is not used; the long channel is marked "SSR tidak diterapkan").
+    ssr_min_snr: float = 100.0            # SNR_frame of the short, both wavelengths (provisional)
+    ssr_gate_achromatic: bool = True
+    ssr_gate_motion: bool = True
+    ssr_correction_lowpass_hz: float = 0.3   # M1: only this slow part of the regression is subtracted
+    quality: QualityConfig = field(default_factory=QualityConfig)
     filters: FilterConfig = field(default_factory=FilterConfig)
 
     def validate(self) -> None:
@@ -110,6 +119,8 @@ class PreviewConfig:
         if self.ssr_method not in SSR_METHODS:
             raise ValueError(f"ssr_method must be one of {SSR_METHODS}")
         _pos(self.baseline_s, "baseline_s")
+        _pos(self.ssr_min_snr, "ssr_min_snr")
+        _pos(self.ssr_correction_lowpass_hz, "ssr_correction_lowpass_hz")
         _pos(self.ssr_window_s, "ssr_window_s")
         if self.ridge_lambda < 0 or not math.isfinite(self.ridge_lambda):
             raise ValueError("ridge_lambda must be finite and >= 0")
@@ -129,7 +140,13 @@ class PreviewConfig:
             "short_separation": {"mode": self.ssr_mode, "method": self.ssr_method,
                                  "ridge_lambda": self.ridge_lambda, "window_s": self.ssr_window_s,
                                  "min_samples": self.ssr_min_samples, "domain": "OD", "causal": True,
-                                 "correction_lowpass_hz": .3, "cardiac_protection": True},
+                                 "window": "time-based (seconds); gaps shorten the history",
+                                 "pairing": "per PD hemisphere (left PD -> left short, right PD -> right short), 5 mm PD only",
+                                 "correction_lowpass_hz": self.ssr_correction_lowpass_hz, "cardiac_protection": True,
+                                 "gate": {"min_snr_frame": self.ssr_min_snr, "achromatic": self.ssr_gate_achromatic,
+                                          "motion": self.ssr_gate_motion,
+                                          "also": "invalid, LOW_SIGNAL, LEAK_WARN, clipped/saturated"}},
+            "signal_quality": self.quality.to_metadata(),
             "display_filters": self.filters.metadata(),
             "off_window": self.off_window,
             "quality": dict(CONSTANTS),

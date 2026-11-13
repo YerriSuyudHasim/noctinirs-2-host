@@ -138,7 +138,7 @@ def test_three_screens_keep_input_and_live_does_not_start(window):
     assert w.setup_steps.currentIndex() == 1
     w.mbll_form.baseline.setValue(7.0)
     w.next.click()
-    w.ssr_form.ssr_mode.setCurrentIndex(w.ssr_form.ssr_mode.findData("8mm"))
+    w.ssr_form.ssr_mode.setCurrentIndex(w.ssr_form.ssr_mode.findData("5mm"))
     w.next.click()
     assert w.setup_steps.currentIndex() == 3
     w.firmware.setText("a" * 40)
@@ -150,7 +150,7 @@ def test_three_screens_keep_input_and_live_does_not_start(window):
     w.next.click()
     w.next.click()
     w.next.click()
-    assert w.ssr_form.ssr_mode.currentData() == "8mm" and w.firmware.text() == "a" * 40
+    assert w.ssr_form.ssr_mode.currentData() == "5mm" and w.firmware.text() == "a" * 40
     wait_for(lambda: "Ready to open the live panel" in w.summary.toPlainText() and w.next.isEnabled())
     screenshot(w, "d2-setup-session.png")
     w.next.click()
@@ -158,7 +158,7 @@ def test_three_screens_keep_input_and_live_does_not_start(window):
     QtTest.QTest.qWait(400)
     assert w.state["device_state"] == "STOPPED" and not w.state["session"]
     assert w.state["raw"]["packets"] == 0 and w.start_button.isEnabled()
-    assert w.preview_cfg.baseline_s == 7.0 and w.preview_cfg.ssr_mode == "8mm"
+    assert w.preview_cfg.baseline_s == 7.0 and w.preview_cfg.ssr_mode == "5mm"
 
 
 def test_default_folder_record_numbering_and_no_overwrite(window, tmp_path):
@@ -284,12 +284,12 @@ def test_live_settings_change_and_baseline_reset(window):
     press_start(w)
     wait_for(lambda: w.state.get("preview_active"))
     wait_for(lambda: w.panel.finite_points("CH1") > 2, seconds=15)
-    w.live_form.ssr_mode.setCurrentIndex(w.live_form.ssr_mode.findData("both"))
+    w.live_form.ssr_mode.setCurrentIndex(w.live_form.ssr_mode.findData("off"))
     w.live_form.dpf_mode.setCurrentIndex(w.live_form.dpf_mode.findData("age"))
     w.live_form.age.setValue(28.0)
     assert "outside the published fit range" in w.live_form.dpf_info.text()
     w.apply_live_button.click()
-    wait_for(lambda: w.state["preview_config"].ssr_mode == "both"
+    wait_for(lambda: w.state["preview_config"].ssr_mode == "off"
              and w.state["preview_config"].dpf.mode == "age")
     w.reset_baseline_button.click()
     wait_for(lambda: not w._pending)

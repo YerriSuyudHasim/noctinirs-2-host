@@ -99,10 +99,17 @@ def info_lines(ascii_text: str | None) -> str:
     return "\n".join(part.strip() for part in ascii_text.split(";") if part.strip())
 
 
+GEOMETRY_DEFAULT_WARNING = (
+    "\n⚠ PERINGATAN: aplikasi dibuka TANPA --geometry, jadi geometri bawaan optical_geometry_v1.json dipakai, "
+    "bukan konfigurasi board 1 (PD 8 mm dikecualikan dari kalibrasi). Untuk uji bench board 1 jalankan dengan "
+    "--geometry config\\optical_geometry_board1.json. Hal ini dicatat di metadata rekaman.")
+
+
 class EngineeringWindow(QtWidgets.QMainWindow):
     def __init__(self, geometry, host_sha=None, *, run_factory=EngineeringRun, documents=None,
-                 settings=None):
+                 settings=None, geometry_default=False):
         super().__init__()
+        self.geometry_default = geometry_default
         # A closed window is destroyed; a lingering one would be re-styled on every theme change.
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.theme = ThemeManager(settings, self)
@@ -281,7 +288,8 @@ class EngineeringWindow(QtWidgets.QMainWindow):
                               "Nilainya perubahan dari baseline (Δ), bukan nilai mutlak.", "previewbanner"))
         self.welcome_geometry = _label(
             f"Geometry map {self.geometry.geometry_map_id} · status {self.geometry.status}"
-            + (" · DRAFT: jarak dan pemetaan channel belum final." if self.geometry.is_draft else ""), "muted")
+            + (" · DRAFT: jarak dan pemetaan channel belum final." if self.geometry.is_draft else "")
+            + (GEOMETRY_DEFAULT_WARNING if self.geometry_default else ""), "muted")
         page.addWidget(self.welcome_geometry)
 
     # ---- screen 2: staged Setup --------------------------------------------
@@ -677,6 +685,11 @@ class EngineeringWindow(QtWidgets.QMainWindow):
         self.bp = QtWidgets.QCheckBox("Bandpass")
         self.hp = QtWidgets.QCheckBox("Detrend · high-pass 0.01 Hz")
         self.lp = QtWidgets.QCheckBox("Low-pass")
+        self.pulse_protection = QtWidgets.QCheckBox("Proteksi pulsa (jaga pita jantung 1,5–1,8 Hz)")
+        self.pulse_protection.setChecked(True)
+        self.pulse_protection.setToolTip("Aktif: cutoff efektif dilebarkan agar pulsa jantung tidak terpotong. "
+                                         "Nonaktif: LP 0,2–0,58 Hz dan band-pass bebas dipakai apa adanya, untuk melihat tren hemodinamik "
+                                         "(pulsa ikut terpotong).")
         defaults = FilterConfig()
         cutoffs = []
         for label, value in (("Bandpass lower Hz", defaults.band_low), ("Bandpass upper Hz", defaults.band_high),
@@ -688,6 +701,7 @@ class EngineeringWindow(QtWidgets.QMainWindow):
             spin.setValue(value)
             cutoffs.append((label, spin))
         self.bp_lo, self.bp_hi, self.lp_cutoff = [spin for _, spin in cutoffs]
+        form.addRow(self.pulse_protection)
         form.addRow(self.bp)
         for label, spin in cutoffs[:2]:
             form.addRow(label, spin)
@@ -714,7 +728,8 @@ class EngineeringWindow(QtWidgets.QMainWindow):
     def _apply_filters(self):
         cfg = FilterConfig(self.bp.isChecked(), self.bp_lo.value(), self.bp_hi.value(),
                            self.hp.isChecked(), self.lp.isChecked(), self.lp_cutoff.value(),
-                           tuple(name for name, box in self.filter_channels.items() if box.isChecked()))
+                           tuple(name for name, box in self.filter_channels.items() if box.isChecked()),
+                           self.pulse_protection.isChecked())
         cfg = cfg.cardiac_safe(self.state.get("fs") or 10)
         try:
             cfg.validate(self.state.get("fs") or 10)
@@ -838,8 +853,11 @@ class EngineeringWindow(QtWidgets.QMainWindow):
             self.filter_detail.set_text(
                 (f"{cfg.filters.label} · {len(cfg.filters.channels)} channel(s) · OD and Hb only\n"
                  f"Warm-up ≈ {warmup:.0f} s · delay ≈ {delay:.2f} s at {hz:.3g} Hz\n"
-                 f"Proteksi pulsa: BP {cfg.filters.band_low:g}–{cfg.filters.band_high:g} Hz; "
-                 f"LP {cfg.filters.low_cutoff:g} Hz (batas efektif saat aktif). SCR hanya koreksi lambat ≤0.3 Hz."
+                 + (f"Proteksi pulsa AKTIF: BP {cfg.filters.band_low:g}–{cfg.filters.band_high:g} Hz; "
+                    f"LP {cfg.filters.low_cutoff:g} Hz (batas efektif). SCR hanya koreksi lambat ≤0.3 Hz."
+                    if cfg.filters.pulse_protection else
+                    f"Proteksi pulsa NONAKTIF: BP {cfg.filters.band_low:g}–{cfg.filters.band_high:g} Hz; "
+                    f"LP {cfg.filters.low_cutoff:g} Hz dipakai apa adanya — pulsa jantung dapat terpotong.")
                  if sections and cfg.filters.channels else "Filters off. Intensity always shows the original values."))
         self.panel.push(state.get("preview_new", ()))
         self._render()
@@ -1058,7 +1076,8 @@ class EngineeringWindow(QtWidgets.QMainWindow):
         self.reset_baseline_button.setEnabled(bool(s.get("preview_active")) and not self._pending)
         self.apply_live_button.setEnabled(not self._pending and not self._closing_window)
         self.panel.set_geometry_note(
-            ("Geometry DRAFT: distances and mapping are not final. " if s.get("geometry_draft") else "")
+            ("⚠ Tanpa --geometry: geometri bawaan v1 dipakai, bukan board 1. " if str(s.get("geometry_source") or "").startswith("DEFAULT") else "")
+            + ("Geometry DRAFT: distances and mapping are not final. " if s.get("geometry_draft") else "")
             + ("Label 5/8 mm pada short channel belum terverifikasi: pada bench 9 Nov SC2 (8 mm) "
                "jenuh dan SC1 (5 mm) tidak, mungkin tertukar. " if s.get("geometry_draft") else "")
             + "ON/OFF dari fase terjadwal (ON_STABLE/OFF_STABLE), bukan status LED yang diverifikasi "
@@ -1164,7 +1183,10 @@ def main(argv=None, *, run_factory=EngineeringRun, settings=None, documents=None
     args = parser.parse_args(argv)
     if not 2 <= args.preview_delay <= 5:
         parser.error("--preview-delay must be 2–5 seconds")
-    run_factory = partial(run_factory, preview_delay_s=args.preview_delay)
+    geometry_default = args.geometry is None
+    geometry_source = ("DEFAULT bundled optical_geometry_v1.json (no --geometry given)" if geometry_default
+                       else f"--geometry {args.geometry.name}")
+    run_factory = partial(run_factory, preview_delay_s=args.preview_delay, geometry_source=geometry_source)
     if args.calibration_config is not None:
         try:
             params, plan = load_configuration(args.calibration_config)
@@ -1176,7 +1198,7 @@ def main(argv=None, *, run_factory=EngineeringRun, settings=None, documents=None
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([sys.argv[0]])
     app.setStyle("Fusion")      # one consistent base style under the generated style sheet
     window = EngineeringWindow(load_geometry(args.geometry or geometry_path()), args.host_sha, run_factory=run_factory,
-                               settings=settings, documents=documents)
+                               settings=settings, documents=documents, geometry_default=geometry_default)
     worker = window.worker      # keep our own reference: after the close the window object is deleted by Qt
     window.show()
     if on_show is not None:     # test hook: called once the window is shown, inside the event loop's start-up

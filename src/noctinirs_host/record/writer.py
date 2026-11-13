@@ -63,7 +63,8 @@ class Recorder:
                  name: str | None = None, host_sha: str | None = None,
                  firmware_sha: str | None = None, firmware_sha_source: str | None = None,
                  observed_info: dict | None = None, boot_id: int | None = None,
-                 record_raw: bool = False) -> None:
+                 record_raw: bool = False, geometry_source: str | None = None) -> None:
+        self._geometry_source = geometry_source
         if not isinstance(queue_size, int) or isinstance(queue_size, bool) or queue_size <= 0:
             raise ValueError("queue_size must be a positive integer")
         if name is not None and (not name or Path(name).name != name or name in (".", "..")):
@@ -444,7 +445,8 @@ class Recorder:
             "firmware": copy.deepcopy(self._firmware), "host_time_basis": self._host_time_basis,
             "settings_at_start": copy.deepcopy(self._start_settings),
             "queue_capacity": self._q.maxsize,
-            "geometry": {"map_id": g.geometry_map_id, "sha256": g.sha256, "status": g.status},
+            "geometry": {"map_id": g.geometry_map_id, "sha256": g.sha256, "status": g.status,
+                         **({"source": self._geometry_source} if self._geometry_source else {})},
             "gate_config_ids": gates,
             "fs_hz": self._start_settings.get("fs_hz"),
             "led_current_ma": self._start_settings.get("led_current_ma"),

@@ -89,11 +89,10 @@ class PreviewSettingsForm(QtWidgets.QWidget):
         if "ssr" in self.sections:
             self.ssr_mode = QtWidgets.QComboBox()
             for mode in SSR_MODES:
-                self.ssr_mode.addItem({"off": "Off", "5mm": "5 mm", "8mm": "8 mm",
-                                       "both": "Both (5 mm + 8 mm)"}[mode], mode)
+                self.ssr_mode.addItem({"off": "Off", "5mm": "5 mm (hemisfer sama, PD 5 mm saja)"}[mode], mode)
             self.ssr_method = QtWidgets.QComboBox()
             for method in SSR_METHODS:
-                self.ssr_method.addItem(method.upper() if method != "auto" else "Auto (OLS; Ridge for both)",
+                self.ssr_method.addItem(method.upper() if method != "auto" else "Auto (OLS)",
                                         method)
             self.ridge = d(decimals=6, minimum=0.0, maximum=1000.0, singleStep=0.001)
             self.window = d(decimals=1, minimum=1.0, maximum=600.0, singleStep=5.0)
@@ -197,6 +196,9 @@ SHARED_SCALE_PERIOD_S = 0.5
 Y_SHRINK_RATIO = 1.8      # keep the y range until it is this much wider than the data needs
 TRACE_WIDTH = 2.2        # px of the current trace; the previous sweep pass is thinner
 KEYS = {"Hb": ("hbo", "hbr"), "OD": ("od1", "od2"), "I": ("i1", "i2")}
+
+
+_TIER_TEXT = {"good": "baik", "noisy": "berisik", "bad": "buruk", "not_assessable": "tidak dapat dinilai"}
 
 
 def channel_order(geometry) -> list:
@@ -383,6 +385,7 @@ class PreviewPanel(QtWidgets.QWidget):
         self.lock_scale = False
         self.current = "CH1"
         self._pts: dict = {c.name: deque() for c in geometry.channels}   # ChannelPoint history (detail, status)
+        self._motion_last: dict = {}
         self._tl: list = []                                                  # shared time of every cached row
         self._cols = {c.name: {k: [] for k in ("hbo", "hbr", "od1", "od2", "i1", "i2", "warn", "unc")}
                       for c in geometry.channels}
@@ -736,6 +739,7 @@ class PreviewPanel(QtWidgets.QWidget):
                 d.append(p)
                 if len(d) > 4000:
                     d.popleft()
+        self._motion_last = dict(frames[-1].motion)
         t_last = self._tl[-1]
         if self._tl[0] < t_last - RETAIN_S - 20:
             k = bisect.bisect_left(self._tl, t_last - RETAIN_S)
@@ -765,6 +769,8 @@ class PreviewPanel(QtWidgets.QWidget):
             text, color = "◆ tanpa koreksi SCR", t.marker_uncorrected
         else:
             text, color = "● OK", t.success
+        if p.state == "VALID" and self._motion_for(name):
+            text, color = text + " · ⚑ GERAK", t.warning       # marker only: nothing is corrected or removed
         cfg = getattr(self, "filter_config", None)
         if self.mode != "I" and cfg and cfg.label and name in cfg.channels:
             warming = "*" if p.filter_warming else ""
@@ -1027,6 +1033,11 @@ class PreviewPanel(QtWidgets.QWidget):
             self.selected.emit(name)
             self.detail_changed.emit()
 
+    def _motion_for(self, name: str) -> bool:
+        ch = self.channels[name]
+        side = next((d.side for d in self.geometry.detectors if d.pd == ch.pd), None)
+        return bool(self._motion_last.get(side))
+
     def detail_rows(self, name: str | None = None) -> list:
         """[(label, value)] for the channel's newest frame. Names follow CHn_I735 etc."""
         name = name or self.current
@@ -1045,5 +1056,14 @@ class PreviewPanel(QtWidgets.QWidget):
                   "applied, β " + ", ".join(fmt(b, 3) for b in p.ssr_beta) if p.ssr_applied else
                   ("tanpa koreksi SCR: " + p.ssr_reason if p.ssr_state == "UNCORRECTED" else "off")),
                  ("Noise σ (counts) 735 / 850", f"{fmt(p.sigma735, 3)} / {fmt(p.sigma850, 3)}"),
-                 ("I/σ (measured) 735 / 850", f"{fmt(p.snr735, 3)} / {fmt(p.snr850, 3)}")]
+                 ("SNR_frame = I/σ per frame 10 Hz (rasio, tanpa satuan) 735 / 850",
+                  f"{fmt(p.snr735, 3)} / {fmt(p.snr850, 3)}"),
+                 ("CV_% = 100/SNR_frame (σ/I dalam persen) 735 / 850",
+                  f"{fmt(100 / p.snr735 if p.snr735 == p.snr735 and p.snr735 else math.nan, 3)} / "
+                  f"{fmt(100 / p.snr850 if p.snr850 == p.snr850 and p.snr850 else math.nan, 3)}"),
+                 ("Kategori kualitas (PROVISIONAL, satu subjek; ambang dapat diatur)", _TIER_TEXT.get(p.tier, p.tier)),
+                 ("SCI (korelasi 735/850, pita jantung) / jantung dB",
+                  f"{fmt(p.sci, 3)} / {fmt(p.cardiac_db, 3)}"),
+                 ("r(ΔHbO, ΔHbR) pita jantung (≈ +1: akromatik = kebocoran/shunt)", fmt(p.r_hbo_hbr, 3)),
+                 ("Penanda gerak hemisfer (hanya penanda)", "GERAK" if self._motion_for(name) else "tidak ada")]
         return rows

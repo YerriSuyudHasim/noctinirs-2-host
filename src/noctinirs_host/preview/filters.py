@@ -14,6 +14,8 @@ class FilterConfig:
     lowpass: bool = False
     low_cutoff: float = .5
     channels: tuple[str, ...] = ()
+    # Proteksi pulsa (Owner M2): True keeps the 1.5-1.8 Hz pulse band; False allows LP 0.2-0.58 Hz and free band-pass.
+    pulse_protection: bool = True
 
     def validate(self, fs):
         if (not all(isfinite(f) and f > 0 for f in (self.band_low, self.band_high, self.low_cutoff))
@@ -25,7 +27,9 @@ class FilterConfig:
             raise ValueError("Active filter cutoffs must be below half the optical sample rate.")
 
     def cardiac_safe(self, fs):
-        """Effective display cutoffs retain the 1.5–1.8 Hz pulse band."""
+        """Effective display cutoffs retain the 1.5–1.8 Hz pulse band (unless protection is switched off)."""
+        if not self.pulse_protection:
+            return self
         if fs <= 6:
             return replace(self, bandpass=False, lowpass=False)
         return replace(self, band_low=min(self.band_low, .1),

@@ -415,7 +415,7 @@ def test_time_axis_uses_host_receive_time():
 
 
 def test_short_separation_shows_uncorrected_while_warming_then_applied():
-    cfg = PreviewConfig(baseline_s=0.5, ssr_mode="8mm", ssr_min_samples=30)
+    cfg = PreviewConfig(baseline_s=0.5, ssr_mode="5mm", ssr_min_samples=30)
     _, frames = run_pipeline(cfg, cycles=80)
     pts = [fr.points["CH1"] for fr in frames if fr.points["CH1"].state == VALID]
     assert pts[0].ssr_state == "UNCORRECTED" and math.isfinite(pts[0].d_hbo)   # shown, not hidden

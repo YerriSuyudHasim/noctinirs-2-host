@@ -56,10 +56,14 @@ def fit_beta(rows: list, method: str, ridge_lambda: float) -> tuple[list[float],
 
 class RollingRegressor:
     def __init__(self, n_regressors: int, window: int, min_samples: int, method: str,
-                 ridge_lambda: float) -> None:
+                 ridge_lambda: float, window_s: float | None = None) -> None:
+        """``window_s``: time-based window in seconds (rows older than this relative to the newest row
+        leave the fit). ``window`` (rows) is then only the exact-rebuild period and a safety cap, so a gap
+        shortens the history instead of stretching it in time."""
         if method == "auto":
             method = "ridge" if n_regressors == 2 else "ols"
         self.p, self.window, self.min_samples = n_regressors, window, min_samples
+        self.window_s = window_s
         self.method, self.lam = method, ridge_lambda
         self.reset()
 
@@ -86,12 +90,14 @@ class RollingRegressor:
             for j in range(self.p):
                 self.sxx[i][j] += sign * x[i] * x[j]
 
-    def push(self, y: float, x: tuple) -> float | None:
+    def push(self, y: float, x: tuple, t: float | None = None) -> float | None:
         """Add one valid row; return the corrected y, or None while warming up / singular."""
-        self._rows.append((y, tuple(x)))
+        self._rows.append((y, tuple(x), t))
         self._add(y, x, +1)
-        if len(self._rows) > self.window:
-            oy, ox = self._rows.popleft()
+        while len(self._rows) > self.window or (
+                self.window_s is not None and t is not None and len(self._rows) > 1
+                and self._rows[0][2] is not None and t - self._rows[0][2] > self.window_s):
+            oy, ox, _ = self._rows.popleft()
             self._add(oy, ox, -1)
         self._since += 1
         if self._since >= self.window:

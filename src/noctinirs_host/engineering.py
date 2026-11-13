@@ -131,8 +131,10 @@ class EngineeringRun:
     def __init__(self, geometry: Geometry, host_sha: str | None = None, *,
                  controller_factory=SessionController, recorder_factory=Recorder,
                  fake_options: dict | None = None, calibration_params=None, sweep_plan=None,
-                 wifi=None, udp_factory=UDPTransport, preview_delay_s=3.0) -> None:
+                 wifi=None, udp_factory=UDPTransport, preview_delay_s=3.0,
+                 geometry_source: str | None = None) -> None:
         self.geometry = geometry
+        self.geometry_source = geometry_source   # how the geometry was chosen (M6); recorded in the metadata
         self._calibration_safety = tuple(geometry.calibration_safety_targets(slot) for slot in range(20))
         self.wifi = wifi if wifi is not None else WindowsWifi()
         self._udp_factory = udp_factory
@@ -515,6 +517,7 @@ class EngineeringRun:
             target.folder, self.geometry, name=target.name, record_raw=True,
             simulated=ctl.simulated, host_sha=self.host_sha, firmware_sha=target.firmware_sha,
             observed_info=context["observed_info"], boot_id=ctl.boot_id,
+            **({"geometry_source": self.geometry_source} if self.geometry_source else {}),
             settings=lambda: {**context["config"], "device_state": context["device_state"],
                               "preview": self.preview_config.to_metadata()},
         )
@@ -1322,4 +1325,5 @@ class EngineeringRun:
             "preview_limits": self.preview.provenance()["limits"] if self.preview else (),
             "destination_note": self.destination_note,
             "geometry_draft": self.geometry.is_draft, "geometry_status": self.geometry.status,
+            "geometry_source": self.geometry_source,
         }
