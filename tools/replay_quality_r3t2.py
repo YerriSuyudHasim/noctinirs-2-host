@@ -84,4 +84,3 @@ summary = dict(record=a.record, tag=tag, frames=len(rows), input_sha256=before, 
 archive.path.unlink()
 print(json.dumps({k: summary[k] for k in ("record", "tag", "frames", "input_unchanged", "raw_copy_byte_identical",
                                           "archive_problem", "motion")}, default=str))
-
