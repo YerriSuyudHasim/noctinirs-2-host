@@ -1,7 +1,7 @@
 """Rev 2.2 selection in IREF code space. No device, UI or recording dependencies."""
 
 from dataclasses import dataclass
-from math import isfinite, sqrt
+from math import isfinite, log, log1p, sqrt
 
 FS = 8388607
 MAX_CODE = 222
@@ -33,9 +33,15 @@ class Assumptions:
     # Tahap 2 (robust estimator). Host-chosen, provisional; see HOST_R3_TAHAP2_REPORT.
     min_visits_per_code: int = 2        # fewer clean visits: level cannot be chosen (INSUFFICIENT_VISITS)
     min_robust_visits: int = 3          # from here the spread of per-visit sigma gives the uncertainty
-    unknown_uncertainty: float = 0.25   # relative SNR uncertainty assumed below min_robust_visits
-    tie_sigma: float = 2.0              # codes whose SNR intervals (+-tie_sigma*u) overlap the best are tied
+    unknown_uncertainty: float = 0.25   # RETIRED in tahap 2.1 (selection no longer uses SNR ties); kept so older JSON loads
+    tie_sigma: float = 2.0              # RETIRED in tahap 2.1, see above
     drift_cap_fraction: float = 0.15    # upper bound of the drift tolerance, as a fraction of the step
+    # Tahap 2.1 (Owner decision 2026-11-13): choose the code whose ON-OFF step on the brightest live target
+    # detector is closest (log distance) to a target level, among codes that pass the SNR floor and have
+    # enough clean visits. Host-chosen and PROVISIONAL; basis in docs/preview-quality-metrics.md.
+    target_level_long: float = 0.10     # step as a fraction of full scale, long slots
+    target_level_short: float = 0.20    # step as a fraction of full scale, short slots (cap <133 keeps this reachable only near 132)
+    min_choice_visits: int = 3          # clean visits a level needs to be a normal candidate (fewer: flagged fallback only)
 
     def __post_init__(self):
         if (not all(isfinite(x) and x > 0 for x in (self.empirical_target_snr,
@@ -47,7 +53,9 @@ class Assumptions:
                 or type(self.min_visits_per_code) is not int or self.min_visits_per_code < 1
                 or type(self.min_robust_visits) is not int or self.min_robust_visits < 3
                 or not all(isfinite(x) and x > 0 for x in (self.unknown_uncertainty, self.tie_sigma))
-                or not (isfinite(self.drift_cap_fraction) and 0 < self.drift_cap_fraction < 1)):
+                or not (isfinite(self.drift_cap_fraction) and 0 < self.drift_cap_fraction < 1)
+                or not all(isfinite(x) and 0 < x < 1 for x in (self.target_level_long, self.target_level_short))
+                or type(self.min_choice_visits) is not int or self.min_choice_visits < self.min_visits_per_code):
             raise ValueError("Invalid empirical calibration parameters.")
         fractions = (self.adc_margin, self.downward_drift, self.loss_fraction, self.empirical_tie)
         nonnegative = (self.upward_drift, self.prediction_error, self.quant_margin)
@@ -234,44 +242,35 @@ def empirical_choice(levels, targets, default_code, fs, params, offsets=None, *,
             if max(values) > 5:  # Rev 2.2 c_on screen on the bright PD
                 scores[level.code] = values[worst], targets[worst]
 
-    if scores:
-        best = max(snr for snr, _ in scores.values())
+    # Tahap 2.1 selection. 1) a level must reach the SNR floor on its limiting detector (a level below the
+    # floor is never chosen while any other candidate passes); 2) levels with at least min_choice_visits
+    # clean visits are the normal candidates, thinner levels only when nothing else passes (flagged);
+    # 3) among candidates take the step closest to the target level (log distance), levels within
+    # empirical_tie of each other count as equally close and the higher SNR wins, then the lower code.
+    # Nothing passes: fall through to the tier-3 default, never to "the dimmest level".
+    passing = {c: v for c, v in scores.items() if v[0] >= params.empirical_floor_snr}
+    if passing:
         by_code = {level.code: level for level in safe}
-
-        def spread(code):
-            """Relative SNR uncertainty of a level: sigma-spread over visits, or the documented prior."""
-            level, (_, detector) = by_code[code], scores[code]
-            u = level.uncertainty[detector] if detector < len(level.uncertainty) else 0
-            return u if u > 0 and level.visits >= params.min_robust_visits else params.unknown_uncertainty
-
-        best_code = max(scores, key=lambda c: scores[c][0])
-        cutoff = best - abs(best) * params.empirical_tie
-
-        def tied_with_best(code):
-            snr = scores[code][0]
-            if snr >= cutoff:
-                return True
-            # Pairwise test: the difference to the best level against its combined uncertainty.
-            spread_sum = sqrt((spread(code) * snr) ** 2 + (spread(best_code) * best) ** 2)
-            return best - snr <= params.tie_sigma * spread_sum
-
-        tied = [c for c in scores if tied_with_best(c)]
-        # A tie is only a tie between usable levels: when the best one reaches the target,
-        # a tied level below the target does not take part.
-        if best >= target:
-            tied = [c for c in tied if scores[c][0] >= target or scores[c][0] >= cutoff]
-        # Statistically tied: take the lowest code (least LED current/leak, best-supported by the sweep order).
-        code = min(tied)
-        snr, detector = scores[code]
-        if len(tied) > 1 and code != best_code:
-            flags.append("TIE_LOWEST_CODE")
-        if by_code[code].visits < params.min_robust_visits:
+        full = {c: v for c, v in passing.items() if by_code[c].visits >= params.min_choice_visits}
+        pool = full or passing
+        goal = params.target_level_short if short else params.target_level_long
+        step = {c: max((by_code[c].mean[i] - corrections[i] for i in targets), default=0.0) / FS for c in pool}
+        distance = {c: abs(log(step[c] / goal)) if step[c] > 0 else float("inf") for c in pool}
+        nearest = min(distance.values())
+        equal = [c for c in pool if distance[c] <= nearest + log1p(params.empirical_tie)]
+        code = max(equal, key=lambda c: (pool[c][0], -c))
+        snr, detector = pool[code]
+        if len(equal) > 1 and code != min(distance, key=distance.get):
+            flags.append("TIE_HIGHER_SNR")
+        if not full:
+            flags.append("VISIT_FALLBACK")
+        if by_code[code].visits < params.min_choice_visits:
             flags.append("FEW_VISITS")
         flags.extend(w for w in by_code[code].warnings if w not in flags)
+        if step[code] < goal * (1 - params.empirical_tie):
+            flags.append("BELOW_TARGET_LEVEL")   # the safe sweep never reached the target level
         if snr < target:
             flags.append("LOW_SIGNAL")
-        if snr < params.empirical_floor_snr:
-            flags.append("SNR_BELOW_FLOOR")
         if code > LEGACY_DEFAULT:
             flags.append("HIGH_CURRENT_PROFILE")
         return Choice(code, 2, tuple(flags), score=snr / target, limiting_detector=detector)

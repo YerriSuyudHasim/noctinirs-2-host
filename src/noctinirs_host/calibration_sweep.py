@@ -326,6 +326,8 @@ def config_metadata(plan, params):
                 flags=["ASSUMED_REV22_PARAMETERS", "ENBW_PLACEHOLDER", "D1_ANCHOR_UNAVAILABLE",
                        "WHITENESS_UNVERIFIED", "GAIN_READBACK_UNAVAILABLE", "SPECTRAL_PROFILE_UNAVAILABLE"],
                 estimator="RAW scheduled ON_STABLE minus configured OFF_STABLE means; noise excludes 0.8-3 Hz",
+                selection="tahap 2.1: SNR floor, >= min_choice_visits clean visits, step closest to target_level "
+                          "(log distance); no candidate: tier-3 default",
                 spectral_profile=None)
 
 class Sweep:

@@ -1,4 +1,4 @@
-"""Tahap 2 calibration estimators: robust sigma, fallback flags, drift bound, tie rule, ignored PD."""
+"""Tahap 2 / 2.1 calibration estimators: robust sigma, fallback flags, drift bound, target-level selection, ignored PD."""
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -75,13 +75,67 @@ def choose(levels):
     return empirical_choice(levels, (0,), 133, 10, Assumptions())
 
 
-def test_tie_prefers_lowest_code_when_sigma_is_uncertain():
-    # Slot 10/11 pattern: a 2-visit level wins by point estimate, a 7-visit level is not different.
-    levels = [level(16, 4e4, 4e4 / 280, 7, unc=0.2), level(32, 8e4, 8e4 / 400, 2),
-              level(8, 2e4, 2e4 / 130, 2), level(4, 1e4, 1e4 / 130, 2)]
+FSV = 8388607
+
+
+def pct(fraction):
+    """A step of this fraction of full scale."""
+    return fraction * FSV
+
+
+def test_selection_takes_the_level_closest_to_the_target_not_the_lowest_code():
+    # Tahap 2.1: target 10 % of FS (long). Steps 2 %, 10 %, 40 % of FS, all with a high SNR and 5 visits.
+    levels = [level(8, pct(.02), pct(.02) / 300, 5), level(32, pct(.10), pct(.10) / 300, 5),
+              level(67, pct(.40), pct(.40) / 300, 5)]
+    assert choose(levels).code == 32
+    assert "TIE_LOWEST_CODE" not in choose(levels).flags
+    # Nothing reaches the target: the brightest safe level is the closest one and is flagged.
+    dim = [level(8, pct(.001), pct(.001) / 300, 5), level(32, pct(.004), pct(.004) / 300, 5)]
+    choice = choose(dim)
+    assert choice.code == 32 and "BELOW_TARGET_LEVEL" in choice.flags
+
+
+def test_target_level_is_configurable_and_differs_for_short_slots():
+    levels = [level(16, pct(.05), pct(.05) / 300, 5), level(100, pct(.20), pct(.20) / 300, 5)]
+    assert choose(levels).code == 16                                           # long target 10 %: |ln .5| < |ln 2|
+    assert empirical_choice(levels, (0,), 133, 10, replace(Assumptions(), target_level_long=.2)).code == 100
+    assert empirical_choice(levels, (0,), 133, 10, Assumptions(), short=True).code == 100   # short target 20 %
+    with pytest.raises(ValueError):
+        Assumptions(target_level_long=0.0)
+
+
+def test_a_level_below_the_snr_floor_is_never_chosen_while_another_passes():
+    # The 10 %-of-FS level has SNR 2 (below the floor of 5); the 30 % level passes and wins although farther away.
+    levels = [level(32, pct(.10), pct(.10) / 2, 5), level(67, pct(.30), pct(.30) / 50, 5)]
     choice = choose(levels)
-    assert choice.code == 16 and "TIE_LOWEST_CODE" in choice.flags
-    # The cheap 130-SNR levels are not tied with 400 (difference larger than the combined uncertainty).
+    assert choice.code == 67 and "SNR_BELOW_FLOOR" not in choice.flags
+
+
+def test_no_passing_level_falls_back_to_tier3_never_to_the_dimmest_level():
+    levels = [level(8, pct(.0005), pct(.0005) / 1.0, 5), level(67, pct(.002), pct(.002) / 2.0, 5),
+              level(133, pct(.004), pct(.004) / 3.0, 5)]
+    choice = choose(levels)
+    assert (choice.code, choice.tier) == (133, 3) and "DEFAULT_TIER" in choice.flags
+
+
+def test_minimum_visits_decide_before_distance_and_a_thin_fallback_is_flagged():
+    near_thin = level(32, pct(.10), pct(.10) / 300, 2)
+    far_full = level(67, pct(.30), pct(.30) / 300, 3)
+    assert choose([near_thin, far_full]).code == 67
+    choice = choose([near_thin, level(8, pct(.02), pct(.02) / 300, 2)])
+    assert choice.code == 32 and {"FEW_VISITS", "VISIT_FALLBACK"} <= set(choice.flags)
+    assert "VISIT_FALLBACK" not in choose([near_thin, far_full]).flags
+    with pytest.raises(ValueError):
+        Assumptions(min_choice_visits=1)                                         # below min_visits_per_code
+
+
+def test_levels_equally_close_to_the_target_prefer_the_higher_snr():
+    # 10.0 % and 10.3 % of FS are within the 5 % equivalence band: the higher SNR wins and the tie is flagged.
+    levels = [level(32, pct(.100), pct(.100) / 40, 5), level(33, pct(.103), pct(.103) / 90, 5)]
+    choice = choose(levels)
+    assert choice.code == 33 and "TIE_HIGHER_SNR" in choice.flags
+    far = [level(32, pct(.100), pct(.100) / 40, 5), level(33, pct(.130), pct(.130) / 90, 5)]
+    assert choose(far).code == 32                                                # outside the band: distance decides
 
 
 def test_clear_winner_is_kept_and_low_snr_levels_do_not_tie_in():
