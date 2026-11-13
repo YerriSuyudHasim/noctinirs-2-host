@@ -30,6 +30,12 @@ class Assumptions:
     stable_repeat_count: int = 3
     stable_repeat_spread: float = 0.10
     off_window: str = "reported"
+    # Tahap 2 (robust estimator). Host-chosen, provisional; see HOST_R3_TAHAP2_REPORT.
+    min_visits_per_code: int = 2        # fewer clean visits: level cannot be chosen (INSUFFICIENT_VISITS)
+    min_robust_visits: int = 3          # from here the spread of per-visit sigma gives the uncertainty
+    unknown_uncertainty: float = 0.25   # relative SNR uncertainty assumed below min_robust_visits
+    tie_sigma: float = 2.0              # codes whose SNR intervals (+-tie_sigma*u) overlap the best are tied
+    drift_cap_fraction: float = 0.15    # upper bound of the drift tolerance, as a fraction of the step
 
     def __post_init__(self):
         if (not all(isfinite(x) and x > 0 for x in (self.empirical_target_snr,
@@ -37,7 +43,11 @@ class Assumptions:
                 self.stable_repeat_spread)) or self.empirical_floor_snr > self.empirical_target_snr
                 or type(self.stable_repeat_count) is not int or not 3 <= self.stable_repeat_count <= 5
                 or type(self.visit_target_occurrences) is not int or self.visit_target_occurrences < 2
-                or self.off_window not in ("reported", "29-38")):
+                or self.off_window not in ("reported", "29-38")
+                or type(self.min_visits_per_code) is not int or self.min_visits_per_code < 1
+                or type(self.min_robust_visits) is not int or self.min_robust_visits < 3
+                or not all(isfinite(x) and x > 0 for x in (self.unknown_uncertainty, self.tie_sigma))
+                or not (isfinite(self.drift_cap_fraction) and 0 < self.drift_cap_fraction < 1)):
             raise ValueError("Invalid empirical calibration parameters.")
         fractions = (self.adc_margin, self.downward_drift, self.loss_fraction, self.empirical_tie)
         nonnegative = (self.upward_drift, self.prediction_error, self.quant_margin)
@@ -86,6 +96,11 @@ class Level:
     excluded: tuple[str, ...] = ()
     envelope: tuple[float, ...] = ()
     repeat_relative_spread: tuple[float, ...] = ()
+    # Informational only; never excludes a level. warnings e.g. NOISE_FALLBACK_WITHIN_SIGMA.
+    warnings: tuple[str, ...] = ()
+    # Relative uncertainty of the SNR per detector (None-free; 0 when unknown), from per-visit sigma spread.
+    uncertainty: tuple[float, ...] = ()
+    sigma_visits: tuple[int, ...] = ()   # number of visits that contributed to sigma, per detector
 
 
 @dataclass(frozen=True)
@@ -165,6 +180,11 @@ def model_choice(models, targets, g, c_min, c_max, fs, params):
     return Choice(domain[index], 1, tuple(flags), down, up)
 
 
+def visit_shortfall(level, params):
+    """Informational flag: a level with too few clean visits is not scored in tier 2."""
+    return ("INSUFFICIENT_VISITS",) if level.visits < params.min_visits_per_code else ()
+
+
 def level_exclusions(level, params, offsets=None):
     flags = list(level.excluded)
     numbers = (*level.mean, *level.sigma, *level.minimum, *level.peak, *level.envelope)
@@ -205,6 +225,9 @@ def empirical_choice(levels, targets, default_code, fs, params, offsets=None, *,
     targets = live
     scores = {}
     for level in safe:
+        # Scoring needs a minimum of clean visits (outlier-robust estimator needs a sample).
+        if level.visits < params.min_visits_per_code:
+            continue
         if targets and all(level.sigma[i] > 0 for i in targets):
             values = [(level.mean[i] - corrections[i]) / level.sigma[i] for i in targets]
             worst = min(range(len(targets)), key=values.__getitem__)
@@ -213,9 +236,38 @@ def empirical_choice(levels, targets, default_code, fs, params, offsets=None, *,
 
     if scores:
         best = max(snr for snr, _ in scores.values())
+        by_code = {level.code: level for level in safe}
+
+        def spread(code):
+            """Relative SNR uncertainty of a level: sigma-spread over visits, or the documented prior."""
+            level, (_, detector) = by_code[code], scores[code]
+            u = level.uncertainty[detector] if detector < len(level.uncertainty) else 0
+            return u if u > 0 and level.visits >= params.min_robust_visits else params.unknown_uncertainty
+
+        best_code = max(scores, key=lambda c: scores[c][0])
         cutoff = best - abs(best) * params.empirical_tie
-        code = min(c for c, (snr, _) in scores.items() if snr >= cutoff)
+
+        def tied_with_best(code):
+            snr = scores[code][0]
+            if snr >= cutoff:
+                return True
+            # Pairwise test: the difference to the best level against its combined uncertainty.
+            spread_sum = sqrt((spread(code) * snr) ** 2 + (spread(best_code) * best) ** 2)
+            return best - snr <= params.tie_sigma * spread_sum
+
+        tied = [c for c in scores if tied_with_best(c)]
+        # A tie is only a tie between usable levels: when the best one reaches the target,
+        # a tied level below the target does not take part.
+        if best >= target:
+            tied = [c for c in tied if scores[c][0] >= target or scores[c][0] >= cutoff]
+        # Statistically tied: take the lowest code (least LED current/leak, best-supported by the sweep order).
+        code = min(tied)
         snr, detector = scores[code]
+        if len(tied) > 1 and code != best_code:
+            flags.append("TIE_LOWEST_CODE")
+        if by_code[code].visits < params.min_robust_visits:
+            flags.append("FEW_VISITS")
+        flags.extend(w for w in by_code[code].warnings if w not in flags)
         if snr < target:
             flags.append("LOW_SIGNAL")
         if snr < params.empirical_floor_snr:

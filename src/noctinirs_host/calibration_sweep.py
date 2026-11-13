@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from statistics import fmean, stdev
 from math import cos, sin, pi, sqrt
 
-from .calibration import Assumptions, LEGACY_DEFAULT, Level, empirical_choice, level_exclusions
+from .calibration import Assumptions, LEGACY_DEFAULT, Level, empirical_choice, level_exclusions, visit_shortfall
 from .control.profile import IREF_SLOTS
 from .preview.slots import ADC_MAX, ADC_MIN, SlotAssembler
 
@@ -194,25 +194,60 @@ def spectral_noise(values, fs=10.0):
     return sqrt(energy / weight) if weight else stdev(values)
 
 
+def block_noise(rows, ain, fs):
+    """Spectral noise of the ON-OFF step over gap-free blocks of consecutive rows.
+
+    Returns (sigma, source). source is "spectral" when at least one block has 8 rows or more;
+    otherwise the measured within-slot sigma is used and the caller must flag it: it is a
+    different quantity, so it is never mixed silently into a spectral estimate (M4).
+    Blocks are never bridged; missing rows stay missing."""
+    blocks, block, previous = [], [], None
+    for row in rows:
+        if previous is not None and ((row.first_seq - previous) & 0xffffffff) != round(8000 / fs):
+            blocks.append(block)
+            block = []
+        block.append(row.on_mean(ain) - row.off_mean(ain))
+        previous = row.first_seq
+    blocks.append(block)
+    long = [b for b in blocks if len(b) >= 8]
+    if long:
+        total = sum(len(b) for b in long)
+        return sqrt(sum(spectral_noise(b, fs)**2 * len(b) for b in long) / total), "spectral"
+    if not rows:
+        return 0.0, "none"
+    return sqrt(fmean(r.within_sigma(ain)**2 for r in rows)), "within"
+
+
+def robust_noise(visits, slot, ain):
+    """Per-visit noise, then the median over visits (robust to one outlier visit).
+
+    Returns (sigma, relative_uncertainty_of_sigma, n_visits_used, warnings).
+    A visit that only has the within-slot fallback is left out whenever another visit has a
+    spectral estimate; if none has one, the fallback is used and flagged. Uncertainty is the
+    MAD-based spread over visits divided by sqrt(n) and is 0 (unknown) below 3 visits."""
+    per = [block_noise(v.rows[slot], ain, v.fs) for v in visits if v.rows[slot]]
+    spectral = [x for x, src in per if src == "spectral"]
+    warnings = []
+    if spectral:
+        used = spectral
+        if len(spectral) < len(per):
+            warnings.append("NOISE_FALLBACK_VISIT_EXCLUDED")
+    else:
+        used = [x for x, src in per if src == "within"]
+        if used:
+            warnings.append("NOISE_FALLBACK_WITHIN_SIGMA")
+    if not used:
+        return 0.0, 0.0, 0, tuple(warnings)
+    med = sorted(used)[len(used) // 2] if len(used) % 2 else fmean(sorted(used)[len(used)//2 - 1:len(used)//2 + 1])
+    unc = 0.0
+    if len(used) >= 3 and med > 0:
+        mad = 1.4826 * sorted(abs(x - med) for x in used)[len(used) // 2]
+        unc = mad / med / sqrt(len(used))
+    return med, unc, len(used), tuple(warnings)
+
+
 def pooled_noise(visits, slot, ain):
-    variances = []
-    for visit in visits:
-        blocks, block, previous = [], [], None
-        for row in visit.rows[slot]:
-            if previous is not None and ((row.first_seq - previous) & 0xffffffff) != round(8000 / visit.fs):
-                blocks.append(block)
-                block = []
-            block.append(row.on_mean(ain) - row.off_mean(ain))
-            previous = row.first_seq
-        blocks.append(block)
-        for values in blocks:
-            if len(values) >= 8:
-                variances.extend([spectral_noise(values, visit.fs)**2] * len(values))
-        # Short fragments have insufficient spectral resolution. Use measured
-        # within-slot noise conservatively instead of bridging the gap.
-        if not any(len(b) >= 8 for b in blocks):
-            variances.extend(r.within_sigma(ain)**2 for r in visit.rows[slot])
-    return sqrt(fmean(variances)) if variances else 0.0
+    return robust_noise(visits, slot, ain)[0]
 
 
 def repeat_spread(visits, slot, ain):
@@ -234,11 +269,14 @@ def levels_for_slot(visits, slot, reference, targets, params):
         if visit.profile.codes != reference or "SWEEP_CONFIG_MISMATCH" in visit.flags or not usable_visit(visit, slot, params):
             continue
         step = [fmean(row.on_mean(i) - row.off_mean(i) for row in rows) for i in targets]
-        noise = [stdev([r.on_mean(i) - r.off_mean(i) for r in rows]) for i in targets]
+        # Noise of the visit MEAN from the spectral/block estimator (M3), not the raw row std.
+        noise = [block_noise(rows, i, visit.fs)[0] / sqrt(len(rows)) for i in targets]
         if reference_step is None:
             reference_step, reference_noise = step, noise
-        if any(abs(now - baseline) > max(abs(baseline) * params.prediction_error,
-               params.drift_noise_multiple * sqrt(a*a + b*b))
+        # Tolerance: max(prediction error, k*SE of the difference), never above the upper bound.
+        if any(abs(now - baseline) > min(max(abs(baseline) * params.prediction_error,
+                                              params.drift_noise_multiple * sqrt(a*a + b*b)),
+                                          abs(baseline) * params.drift_cap_fraction)
                for now, baseline, a, b in zip(step, reference_step, noise, reference_noise)):
             for affected in visits[previous_reference:index + 1]:
                 affected.flags.add(f"REFERENCE_DRIFT_SLOT_{slot}")
@@ -254,16 +292,27 @@ def levels_for_slot(visits, slot, reference, targets, params):
         # A clipped visit is evidence against the code even if it also lost data.
         rows = [row for visit in valid for row in visit.rows[slot]]
         deltas = [[row.on_mean(i) - row.off_mean(i) for row in rows] for i in range(4)]
+        noise = [robust_noise(valid, slot, i) for i in range(4)]
+        warnings = tuple(dict.fromkeys(w for n in noise for w in n[3]))
         levels.append(Level(
             code, tuple(fmean(x) if x else 0 for x in deltas),
-            tuple(pooled_noise(valid, slot, i) for i in range(4)),
+            tuple(n[0] for n in noise),
             tuple(max(visit.maximum[slot][i] for visit in group) for i in range(4)),
             tuple(min(visit.minimum[slot][i] for visit in group) for i in range(4)),
             len(valid), len(rows), envelope=tuple(max((fmean(r.on_mean(i) - r.off_mean(i)
                 for r in visit.rows[slot]) for visit in valid), default=0) for i in range(4)),
             repeat_relative_spread=tuple(repeat_spread(valid, slot, i) for i in targets),
+            warnings=warnings, uncertainty=tuple(n[1] for n in noise), sigma_visits=tuple(n[2] for n in noise),
         ))
     return levels
+
+
+def ignored_pd_clipped(levels, ignored, params):
+    """M5: detectors left out of scoring by the geometry that still reached the ADC headroom.
+
+    The evidence is kept (it is a hardware fact about that PD) but never influences the code."""
+    return tuple(i for i in ignored if any(
+        level.peak[i] >= params.headroom or level.minimum[i] <= -params.headroom for level in levels))
 
 
 def evidence(report, reply):
@@ -396,15 +445,19 @@ class Sweep:
                 evaluated = levels
             choice = empirical_choice(evaluated, targets, self.defaults["codes"][slot], self.fs, self.params,
                                       short=slot in self.short_slots)
+            clipped_ignored = ignored_pd_clipped(levels, ignored, self.params)
             if ignored:
-                choice = replace(choice, flags=(*choice.flags, "GEOMETRY_PD_EXCLUDED"))
+                choice = replace(choice, flags=(*choice.flags, "GEOMETRY_PD_EXCLUDED",
+                                                *(("IGNORED_PD_CLIPPED",) if clipped_ignored else ())))
             if choice.code is None:
                 default_flags = ", ".join(choice.flags)
                 raise ValueError(f"Slot {slot} has no usable headroom evidence at or below its fallback code "
                                  f"({default_flags}). Check the probe and run a new sweep.")
             choices.append(choice)
-            summary.append(dict(slot=slot, targets=targets, safety_targets=safety, ignored_detectors=ignored, selection=asdict(choice),
+            summary.append(dict(slot=slot, targets=targets, safety_targets=safety, ignored_detectors=ignored,
+                                ignored_pd_clipped=clipped_ignored, selection=asdict(choice),
                                 levels=[dict(asdict(level), exclusions=level_exclusions(evaluated_level, self.params),
+                                             not_scored=visit_shortfall(level, self.params),
                                              all_detector_exclusions=level_exclusions(level, self.params))
                                         for level, evaluated_level in zip(levels, evaluated)]))
         metadata = config_metadata(self.plan, self.params)
